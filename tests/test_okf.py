@@ -530,6 +530,6 @@ Body.
         with open(file_path, "w") as f:
             f.write(content)
 
-        concept = Concept.from_file(file_path)
+        concept = Concept.from_file(file_path, temp_wiki_dir)
         # Concept ID should be relative path without .md
         assert concept.concept_id == "nested/deep/concept"

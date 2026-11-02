@@ -126,10 +126,13 @@ More text.
         concept = Concept.from_file(file_path)
         desc_chunks = chunk_description(concept)
 
-        # Should have one chunk for description
-        assert len(desc_chunks) == 1
+        # Should have chunks for description and headings
+        assert len(desc_chunks) == 2
+        # First chunk should be description
         assert desc_chunks[0].heading == "description"
         assert "This is the description" in desc_chunks[0].text
+        # Second chunk should be heading
+        assert desc_chunks[1].heading == "Section"
 
     def test_heading_chunks(self, temp_wiki_dir):
         """Test that headings are chunked separately."""

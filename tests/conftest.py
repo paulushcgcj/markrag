@@ -53,13 +53,32 @@ Configuration properties can be defined in application.properties.
 
 @pytest.fixture
 def sample_bundle(temp_wiki_dir):
-    """Create a sample bundle with multiple concepts."""
+    """Create a sample bundle with multiple concepts.
+    
+    Creates a proper repo structure: temp_wiki_dir is the wiki directory,
+    and we create a sibling repo directory to satisfy the sibling convention.
+    """
     from markrag.okf import Bundle
+    import os
+
+    # Create a sibling repo directory (without .wiki suffix)
+    repo_dir = temp_wiki_dir.parent / "testrepo"
+    repo_dir.mkdir(exist_ok=True)
+    
+    # Rename temp_wiki_dir to be the .wiki directory (sibling of repo_dir)
+    actual_wiki_dir = temp_wiki_dir.parent / "testrepo.wiki"
+    temp_wiki_dir.rename(actual_wiki_dir)
+    temp_wiki_dir = actual_wiki_dir
 
     # Create index.md
     index_path = temp_wiki_dir / "index.md"
     with open(index_path, "w") as f:
-        f.write("---\nokf_version: "0.2"\n---\n\n# Bundle Index\n")
+        f.write("""---
+okf_version: "0.2"
+---
+
+# Bundle Index
+""")
 
     # Create log.md
     log_path = temp_wiki_dir / "log.md"
@@ -124,6 +143,9 @@ Deploy to production.
         file_path.parent.mkdir(parents=True, exist_ok=True)
         with open(file_path, "w") as f:
             f.write(content)
+
+    # Set MARKRAG_REPO so _get_bundle works correctly
+    os.environ["MARKRAG_REPO"] = str(repo_dir)
 
     bundle = Bundle(root_path=temp_wiki_dir)
     bundle.load()

@@ -182,7 +182,13 @@ def init(ctx: click.Context, repo: str | None, wiki_remote: str | None) -> None:
     click.echo("Creating initial files...")
 
     # Create index.md
-    index_content = "---\nokf_version: "0.2"\n---\n\n# Bundle Index\n\n"
+    index_content = """---
+okf_version: "0.2"
+---
+
+# Bundle Index
+
+"""
     with open(wiki_path / "index.md", "w") as f:
         f.write(index_content)
 
@@ -194,7 +200,11 @@ def init(ctx: click.Context, repo: str | None, wiki_remote: str | None) -> None:
         f.write(log_content)
 
     # Create home.md
-    home_content = "# Wiki Home\n\nThis is the GitHub Wiki for the repository.\n\n"
+    home_content = """# Wiki Home
+
+This is the GitHub Wiki for the repository.
+
+"""
     with open(wiki_path / "home.md", "w") as f:
         f.write(home_content)
 
@@ -210,7 +220,7 @@ def init(ctx: click.Context, repo: str | None, wiki_remote: str | None) -> None:
 
     # Add seed docs to log
     for concept_id in seed_docs:
-        log_entry = f"- [{timestamp}] created: [{seed_docs[concept_id].split('\n')[2]}](/{concept_id}.md) by markrag\n"
+        log_entry = f"- [{timestamp}] created: [{_extract_title(seed_docs[concept_id])}](/{concept_id}.md) by markrag\n"
         with open(wiki_path / "log.md", "a") as f:
             f.write(log_entry)
 
@@ -434,12 +444,13 @@ def _generate_seed_docs(repo_path: Path, wiki_path: Path) -> dict[str, str]:
                 description = line.strip()
                 break
 
+        version = __import__('markrag').__version__
         frontmatter = f"""---
 type: Project
 title: {title}
 description: {description}
 status: draft
-generated: {{by: markrag/{__import__('markrag').__version__}, at: {timestamp}}}
+generated: {{by: markrag/{version}, at: {timestamp}}}
 sources:
   - {{id: readme, resource: README.md, title: Project README}}
 ---
@@ -449,12 +460,13 @@ sources:
         seed_docs["readme"] = frontmatter
 
     # 2. Repository structure
+    version = __import__('markrag').__version__
     structure_content = f"""---
 type: Architecture
 title: Repository Structure
 description: Overview of the repository directory structure
 status: draft
-generated: {{by: markrag/{__import__('markrag').__version__}, at: {timestamp}}}
+generated: {{by: markrag/{version}, at: {timestamp}}}
 sources:
   - {{id: filesystem, resource: {repo_path.name}/, title: Repository filesystem}}
 ---
@@ -488,6 +500,7 @@ This document describes the top-level structure of the repository.
     src_path = repo_path / "src" / repo_path.name
     if src_path.exists():
         main_files = list(src_path.glob("*.py"))[:5]
+        version = __import__('markrag').__version__
         for py_file in main_files:
             module_name = py_file.stem
             content = f"""---
@@ -495,7 +508,7 @@ type: Module
 title: {module_name.capitalize()}
 description: Auto-generated documentation for {module_name}.py
 status: draft
-generated: {{by: markrag/{__import__('markrag').__version__}, at: {timestamp}}}
+generated: {{by: markrag/{version}, at: {timestamp}}}
 sources:
   - {{id: {module_name}, resource: src/{repo_path.name}/{module_name}.py, title: Source file}}
 ---
@@ -517,21 +530,34 @@ TODO: Document key functions and classes
     return seed_docs
 
 
+def _extract_title(content: str) -> str:
+    """Extract title from concept content."""
+    lines = content.split("\n")
+    for line in lines:
+        if line.startswith("title: "):
+            return line[7:]
+    return "Untitled"
+
+
 def _update_index_for_seed(wiki_path: Path, seed_docs: dict[str, str]) -> None:
     """Update index.md with seed documents."""
     index_path = wiki_path / "index.md"
     if not index_path.exists():
         with open(index_path, "w") as f:
-            f.write("---\nokf_version: "0.2"\n---\n\n# Bundle Index\n\n")
+            f.write("""---
+okf_version: "0.2"
+---
+
+# Bundle Index
+
+""")
 
     with open(index_path, "r") as f:
         content = f.read()
 
     # Add seed docs to index
     for concept_id in seed_docs:
-        title = seed_docs[concept_id].split("\n")[2]  # After --- and type line
-        if title.startswith("title: "):
-            title = title[7:]
+        title = _extract_title(seed_docs[concept_id])
         content += f"- [{title}](/{concept_id}.md)\n"
 
     with open(index_path, "w") as f:

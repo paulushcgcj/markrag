@@ -35,19 +35,22 @@ keywords = [
     "sqlite",
     "fastembed",
 ]
+# Local-first: fastembed (ONNX, CPU) is the default embedder. No hosted
+# services; optional OpenAI-compatible endpoint via [openai] extra.
 dependencies = [
     "mcp[cli]>=1.3.0,<2.0.0",
     "python-frontmatter>=1.0.0",
     "fastembed>=0.3.0",
     "click>=8.1.0",
+    # Direct import in embeddings.py / index.py (also pulled by fastembed).
+    "numpy>=1.26",
 ]
 
+# Optional OpenAI-compatible embedding endpoint (MARKRAG_EMBEDDING_PROVIDER=openai).
+# Default embeddings are local via fastembed; this extra is only needed for that opt-in.
 [project.optional-dependencies]
-test = [
-    "pytest>=8.0.0",
-    "pytest-asyncio>=0.23.0",
-    "pytest-cov>=4.1.0",
-    "pytest-mock>=3.14.0",
+optin = [
+    "httpx>=0.27.0",
 ]
 
 [project.scripts]
@@ -130,4 +133,13 @@ dev = [
     "pyright>=1.1.410",
     "ruff>=0.15.19",
     "pyinstaller",
+    "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+    # pytest-asyncio is a transitive dep of mcp[cli]; markrag tests are sync.
+    "ignore::pytest.PytestDeprecationWarning",
 ]

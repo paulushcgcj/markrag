@@ -68,7 +68,12 @@ class Generated:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Self:
         """Create Generated from a dictionary."""
-        return cls(by=data.get("by", ""), at=data.get("at", ""))
+        by = data.get("by", "")
+        at = data.get("at", "")
+        # Convert datetime to string if needed
+        if hasattr(at, "isoformat"):
+            at = at.isoformat().replace("+00:00", "Z")
+        return cls(by=str(by), at=str(at))
 
     def to_dict(self) -> dict[str, str]:
         """Convert to dictionary."""
@@ -85,7 +90,12 @@ class Verified:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Self:
         """Create Verified from a dictionary."""
-        return cls(by=data.get("by", ""), at=data.get("at", ""))
+        by = data.get("by", "")
+        at = data.get("at", "")
+        # Convert datetime to string if needed
+        if hasattr(at, "isoformat"):
+            at = at.isoformat().replace("+00:00", "Z")
+        return cls(by=str(by), at=str(at))
 
     def to_dict(self) -> dict[str, str]:
         """Convert to dictionary."""
@@ -170,6 +180,11 @@ class Frontmatter:
                 if isinstance(ver_data, dict):
                     verified_list.append(Verified.from_dict(ver_data))
 
+        # Convert stale_after to string if it's a datetime
+        stale_after = metadata.get("stale_after")
+        if stale_after is not None and hasattr(stale_after, "isoformat"):
+            stale_after = stale_after.isoformat().replace("+00:00", "Z")
+
         return cls(
             type=metadata.get("type", ""),
             title=metadata.get("title"),
@@ -180,7 +195,7 @@ class Frontmatter:
             generated=generated_obj,
             verified=verified_list,
             status=metadata.get("status", "stable"),
-            stale_after=metadata.get("stale_after"),
+            stale_after=stale_after,
             okf_version=metadata.get("okf_version"),
             unknown_fields=unknown,
         )
@@ -242,26 +257,33 @@ class Concept:
         return self.path.name
 
     @classmethod
-    def from_file(cls, file_path: Path) -> Self:
+    def from_file(cls, file_path: Path, bundle_root: Path | None = None) -> Self:
         """Load a concept from a markdown file."""
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
 
-        return cls.from_content(file_path, content)
+        return cls.from_content(file_path, content, bundle_root)
 
     @classmethod
-    def from_content(cls, file_path: Path, content: str) -> Self:
-        """Parse a concept from file path and content."""
+    def from_content(cls, file_path: Path, content: str, bundle_root: Path | None = None) -> Self:
+        """Parse a concept from file path and content.
+        
+        Args:
+            file_path: Path to the markdown file
+            content: File content
+            bundle_root: Optional bundle root for relative path calculation
+        """
         post = frontmatter.loads(content)
         fm = Frontmatter.from_post(post)
 
-        # Derive concept_id: relative path without .md
-        # The concept_id is relative to the bundle root
-        concept_id = file_path.stem
-        if file_path.parent != file_path:  # If not at root
-            # Get relative path from parent directory
-            rel_path = file_path.relative_to(file_path.parent)
+        # Derive concept_id: relative path from bundle root without .md
+        if bundle_root:
+            # Get relative path from bundle root
+            rel_path = file_path.relative_to(bundle_root)
             concept_id = str(rel_path.with_suffix("")).replace("\\", "/")
+        else:
+            # Fallback: use stem if we don't have bundle root
+            concept_id = file_path.stem
 
         return cls(
             path=file_path.resolve(),
@@ -330,10 +352,9 @@ class Bundle:
                 continue
 
             try:
-                concept = Concept.from_file(md_file)
-                # Use relative path without .md as concept_id
-                concept_id = str(rel_path.with_suffix("")).replace("\\", "/")
-                concept.concept_id = concept_id
+                concept = Concept.from_file(md_file, self.root_path)
+                # concept_id should already be set correctly from from_file
+                concept_id = concept.concept_id
                 self.concepts[concept_id] = concept
             except Exception as e:
                 # Log but don't fail on individual file parse errors

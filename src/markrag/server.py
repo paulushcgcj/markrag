@@ -32,9 +32,21 @@ _bundle_path: Path | None = None
 _index_db_path: Path | None = None
 
 
-def _get_bundle(repo_path: str | None = None) -> Bundle:
+def _get_bundle(repo_path: str | None = None, wiki_path: Path | None = None) -> Bundle:
     """Get or create the bundle for the current repo."""
     global _bundle, _bundle_path
+
+    # If wiki_path is explicitly provided, use it
+    if wiki_path:
+        if _bundle is None or _bundle_path != wiki_path:
+            _bundle_path = wiki_path
+            _bundle = Bundle(root_path=wiki_path)
+            try:
+                _bundle.load()
+            except FileNotFoundError:
+                # Wiki doesn't exist yet - create empty bundle
+                _bundle = Bundle(root_path=wiki_path)
+        return _bundle
 
     # Determine repo path
     if repo_path:
@@ -43,7 +55,8 @@ def _get_bundle(repo_path: str | None = None) -> Bundle:
         repo_path_obj = Path(os.getenv("MARKRAG_REPO", "."))
 
     # Derive wiki path (sibling convention)
-    wiki_path = repo_path_obj.parent / f"{repo_path_obj.name}.wiki"
+    # If repo is at /path/to/<name>, wiki is at /path/to/<name>.wiki
+    wiki_path = repo_path_obj.with_suffix(".wiki")
 
     # Check if we need to reload
     if _bundle is None or _bundle_path != wiki_path:
@@ -358,6 +371,13 @@ def okf_read(
     concept = bundle.get_concept(concept_id)
 
     if concept is None:
+        # Check if this is a reserved file
+        reserved_stems = {f.replace(".md", "") for f in RESERVED_FILES}
+        if concept_id in reserved_stems:
+            return {
+                "error": f"{concept_id} is a server-managed file, not a concept",
+                "concept_id": concept_id,
+            }
         return {
             "error": f"Concept not found: {concept_id}",
             "concept_id": concept_id,
@@ -471,12 +491,13 @@ def okf_write(
     # Prepare frontmatter
     now = datetime.now(timezone.utc)
     timestamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    version = __import__('markrag').__version__
 
     # Build sources if provided
+    from markrag.okf import Source, Generated, Verified
     source_objs = []
     if sources:
         for s in sources:
-            from markrag.okf import Source
             source_objs.append(Source(
                 id=s.get("id", ""),
                 resource=s.get("resource", ""),
@@ -496,7 +517,7 @@ def okf_write(
         description=description,
         tags=tags or [],
         sources=source_objs,
-        generated={"by": f"markrag/{__import__('markrag').__version__}", "at": timestamp},
+        generated=Generated(by=f"markrag/{version}", at=timestamp),
         verified=preserved_verified,  # Preserve existing verification
         status="draft",
         unknown_fields={},
@@ -642,7 +663,13 @@ def _regenerate_index_and_home(bundle: Bundle) -> None:
     bundle.load()
 
     # Generate index.md content
-    index_content = "---\nokf_version: "0.2"\n---\n\n# Bundle Index\n\n"
+    index_content = """---
+okf_version: "0.2"
+---
+
+# Bundle Index
+
+"""
 
     # Group concepts by directory
     from collections import defaultdict
@@ -661,15 +688,16 @@ def _regenerate_index_and_home(bundle: Bundle) -> None:
         dirs[dir_path].append((concept_id, concept))
 
     # Write root-level concepts
-    if "." in dirs:
+    root_key = "."
+    if root_key in dirs:
         index_content += "## Root\n\n"
-        for concept_id, concept in sorted(dirs[""."], key=lambda x: x[1].frontmatter.title or x[0]):
+        for concept_id, concept in sorted(dirs[root_key], key=lambda x: x[1].frontmatter.title or x[0]):
             trust = derive_trust_level(concept)
             stale = is_stale(concept)
             stale_marker = " (stale)" if stale else ""
             index_content += f"- [{concept.frontmatter.title or concept_id}](/{concept_id}.md) | {concept.frontmatter.type} | {concept.frontmatter.status} | {trust}{stale_marker}\n"
         index_content += "\n"
-        del dirs[""."]
+        del dirs[root_key]
 
     # Write subdirectories
     for dir_path in sorted(dirs.keys()):

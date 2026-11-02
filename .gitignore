@@ -1,28 +1,33 @@
-# Python bytecode / caches
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
+*$py.class
 
-# Virtual environments
+# Virtual environment
 .venv/
+venv/
+ENV/
 env/
 
-# Build artifacts / packaging dists
-build/
-dist/
-*.egg-info/
-.eggs/
-
-# Test / tooling caches
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-
-# Local data / indexes (RAG stores)
-*.db
-*.sqlite3
-data/
-
-# Editor / OS cruft
-.DS_Store
+# IDE
 .idea/
 .vscode/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Distribution
+*.egg-info/
+.dists/
+build/
+
+# Local markrag cache
+.markrag/
+
+# OS files
+.DS_Store
+Thumbs.db
