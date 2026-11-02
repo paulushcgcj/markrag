@@ -1,0 +1,133 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "markrag"
+version = "0.1.0"
+description = "OKF-backed RAG MCP server for per-repo wikis"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [
+    { name = "Paul Cruz", email = "paulushcgcj@gmail.com" }
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Utilities",
+]
+keywords = [
+    "mcp",
+    "model-context-protocol",
+    "rag",
+    "retrieval",
+    "wiki",
+    "okf",
+    "knowledge",
+    "sqlite",
+    "fastembed",
+]
+dependencies = [
+    "mcp[cli]>=1.3.0,<2.0.0",
+    "python-frontmatter>=1.0.0",
+    "fastembed>=0.3.0",
+    "click>=8.1.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "pytest-mock>=3.14.0",
+]
+
+[project.scripts]
+markrag = "markrag.cli:cli"
+
+[project.urls]
+Homepage = "https://github.com/paulushcgcj/markrag"
+Documentation = "https://github.com/paulushcgcj/markrag#readme"
+Repository = "https://github.com/paulushcgcj/markrag"
+"Bug Tracker" = "https://github.com/paulushcgcj/markrag/issues"
+Changelog = "https://github.com/paulushcgcj/markrag/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/markrag"]
+
+[tool.uv]
+package = true
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = "mcp.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "fastembed.*"
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "W",
+    "F",
+    "I",
+    "B",
+    "C4",
+    "UP",
+]
+ignore = [
+    "E501",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["markrag"]
+
+[tool.coverage.run]
+branch = true
+source = ["src/markrag"]
+omit = [
+    "src/markrag/__main__.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 90
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=2.1.0",
+    "pyright>=1.1.410",
+    "ruff>=0.15.19",
+    "pyinstaller",
+]
