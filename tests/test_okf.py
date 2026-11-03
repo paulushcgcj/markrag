@@ -1,18 +1,15 @@
 """Tests for OKF format handling."""
 
-import pytest
 
 from markrag.okf import (
+    RESERVED_FILES,
     Bundle,
     Concept,
-    Frontmatter,
-    RESERVED_FILES,
-    Source,
-    Verified,
-    Generated,
+    append_log_entry,
     derive_trust_level,
-    is_stale,
     get_stale_days,
+    is_stale,
+    path_fingerprint,
 )
 
 
@@ -533,3 +530,84 @@ Body.
         concept = Concept.from_file(file_path, temp_wiki_dir)
         # Concept ID should be relative path without .md
         assert concept.concept_id == "nested/deep/concept"
+
+
+class TestLogEntries:
+    """Test the wiki change log writer."""
+
+    def test_a_missing_log_is_created(self, temp_wiki_dir):
+        """A new log gets a title and a dated section."""
+        path = append_log_entry(temp_wiki_dir, "- first entry", date="2026-01-01")
+
+        content = path.read_text(encoding="utf-8")
+        assert content.startswith("# Directory Update Log")
+        assert "## 2026-01-01" in content
+        assert "- first entry" in content
+
+    def test_an_existing_date_is_reused(self, temp_wiki_dir):
+        """A second entry on the same date joins the same section."""
+        append_log_entry(temp_wiki_dir, "- first entry", date="2026-01-01")
+        append_log_entry(temp_wiki_dir, "- second entry", date="2026-01-01")
+
+        content = (temp_wiki_dir / "log.md").read_text(encoding="utf-8")
+        assert content.count("## 2026-01-01") == 1
+        assert "- first entry" in content
+        assert "- second entry" in content
+
+    def test_a_newer_date_lands_on_top(self, temp_wiki_dir):
+        """Sections stay in reverse chronological order."""
+        append_log_entry(temp_wiki_dir, "- older entry", date="2026-01-01")
+        append_log_entry(temp_wiki_dir, "- newer entry", date="2026-02-02")
+
+        content = (temp_wiki_dir / "log.md").read_text(encoding="utf-8")
+        assert content.index("## 2026-02-02") < content.index("## 2026-01-01")
+
+    def test_existing_content_is_preserved(self, temp_wiki_dir):
+        """A hand-written history survives a machine entry."""
+        (temp_wiki_dir / "log.md").write_text(
+            "# Directory Update Log\n\n## 2025-12-01\n\n- a human entry\n",
+            encoding="utf-8",
+        )
+
+        append_log_entry(temp_wiki_dir, "- a machine entry", date="2026-01-01")
+
+        content = (temp_wiki_dir / "log.md").read_text(encoding="utf-8")
+        assert "- a human entry" in content
+        assert "- a machine entry" in content
+
+    def test_a_directory_log_is_written_separately(self, temp_wiki_dir):
+        """A directory owns its own log."""
+        path = append_log_entry(temp_wiki_dir, "- scoped entry", directory="kb/frontend")
+
+        assert path == temp_wiki_dir / "kb" / "frontend" / "log.md"
+        assert not (temp_wiki_dir / "log.md").exists()
+
+
+class TestFingerprintIsolation:
+    """Test that navigation files never invalidate a bundle."""
+
+    def test_reserved_files_do_not_change_the_fingerprint(self, temp_wiki_dir):
+        """Regenerating the indexes is not a content change."""
+        (temp_wiki_dir / "concept.md").write_text(
+            "---\ntype: Concept\n---\nContent.", encoding="utf-8"
+        )
+        bundle = Bundle(root_path=temp_wiki_dir)
+        bundle.load()
+        before = path_fingerprint(temp_wiki_dir)
+
+        (temp_wiki_dir / "index.md").write_text("# Index\n", encoding="utf-8")
+        (temp_wiki_dir / "log.md").write_text("# Log\n", encoding="utf-8")
+        (temp_wiki_dir / "home.md").write_text("# Home\n", encoding="utf-8")
+
+        assert path_fingerprint(temp_wiki_dir) == before
+        assert bundle.is_stale() is False
+
+    def test_a_content_change_does_change_the_fingerprint(self, temp_wiki_dir):
+        """Editing a document is a content change."""
+        concept = temp_wiki_dir / "concept.md"
+        concept.write_text("---\ntype: Concept\n---\nContent.", encoding="utf-8")
+        before = path_fingerprint(temp_wiki_dir)
+
+        concept.write_text("---\ntype: Concept\n---\nDifferent content.", encoding="utf-8")
+
+        assert path_fingerprint(temp_wiki_dir) != before
