@@ -8,7 +8,34 @@
 
 **markrag** serves a curated knowledge wiki as an MCP server so AI coding agents can retrieve trustworthy, per-repository information. The wiki follows the [Open Knowledge Format (OKF) v0.2](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) specification.
 
-[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
+<p align="center">
+  <a href="https://pypi.org/project/markrag/"><img src="https://img.shields.io/pypi/v/markrag.svg?cacheSeconds=3600" alt="PyPI version"/></a>
+  <a href="https://pypi.org/project/markrag/"><img src="https://img.shields.io/pypi/pyversions/markrag.svg" alt="Python versions"/></a>
+  <a href="https://github.com/paulushcgcj/markrag/actions/workflows/ci.yml"><img src="https://github.com/paulushcgcj/markrag/actions/workflows/ci.yml/badge.svg" alt="CI"/></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/paulushcgcj/markrag.svg" alt="License: GPL-3.0"/></a>
+</p>
+
+## Installation
+
+**Mac / Linux**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/paulushcgcj/markrag/main/install.sh | bash
+```
+
+**Windows (PowerShell)**
+
+```powershell
+irm https://raw.githubusercontent.com/paulushcgcj/markrag/main/install.ps1 | iex
+```
+
+**Via uv (all platforms)**
+
+```bash
+uv tool install markrag
+```
+
+> **macOS note:** if you see a security warning on first run, clear the quarantine flag once: `xattr -d com.apple.quarantine /usr/local/bin/markrag`
 
 ## What it is
 
