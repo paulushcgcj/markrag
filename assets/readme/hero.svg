@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-labelledby="title desc">
+  <title id="title">markrag — OKF-backed RAG MCP server for per-repo wikis</title>
+  <desc id="desc">Hero visual for markrag: title with OKF-backed RAG description and a terminal proof showing init and serve workflow.</desc>
+  <defs>
+    <style>
+      .sys { font-family: -apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    </style>
+  </defs>
+  <rect width="1200" height="360" rx="24" fill="#0a0a0a"/>
+  <!-- subtle grid -->
+  <g stroke="#1a1a1a" stroke-width="1" opacity="0.6">
+    <line x1="64" y1="0" x2="64" y2="360"/>
+    <line x1="1136" y1="0" x2="1136" y2="360"/>
+  </g>
+  <g transform="translate(64 72)">
+    <text x="0" y="0" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="14" fill="#7a7a7a" letter-spacing="0.08em">DEVELOPER TOOL</text>
+    <text x="0" y="58" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="64" font-weight="700" fill="#e8e8e8">markrag</text>
+    <text x="0" y="108" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="22" fill="#b8b8b8">OKF-backed RAG MCP server for per-repo wikis</text>
+    <text x="0" y="152" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="16" fill="#8a8a8a">SQLite FTS5 + vector search • Reciprocal Rank Fusion • Trust model</text>
+    <!-- motif -->
+    <g transform="translate(0 190)" fill="#5a6d8a">
+      <rect x="0" y="0" width="240" height="2"/>
+      <text x="0" y="22" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" fill="#7aa2f7">> markrag init</text>
+      <text x="0" y="46" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" fill="#7aa2f7">> markrag serve</text>
+    </g>
+  </g>
+  <!-- proof terminal -->
+  <g transform="translate(740 80)">
+    <rect width="360" height="220" rx="16" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
+    <rect width="360" height="28" rx="16" fill="#1a1a1a"/>
+    <circle cx="16" cy="14" r="5" fill="#3a3a3a"/>
+    <circle cx="34" cy="14" r="5" fill="#3a3a3a"/>
+    <circle cx="52" cy="14" r="5" fill="#3a3a3a"/>
+    <text x="20" y="48" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" fill="#e8e8e8">$ cd ~/Repos/myorg/myrepo</text>
+    <text x="20" y="74" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" fill="#e8e8e8">$ markrag init</text>
+    <text x="20" y="100" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" fill="#7a7a7a">created ~/Repos/myorg/myrepo.wiki</text>
+    <text x="20" y="126" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" fill="#e8e8e8">$ markrag serve</text>
+    <text x="20" y="152" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" fill="#7a7a7a">MCP server listening on stdio</text>
+    <!-- wiki diagram -->
+    <g transform="translate(20 180)">
+      <rect x="0" y="0" width="160" height="28" rx="6" fill="#1a1a1a" stroke="#3a3a3a"/>
+      <text x="8" y="18" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#b8b8b8">myrepo/</text>
+      <rect x="180" y="-6" width="140" height="40" rx="6" fill="#0f0f0f" stroke="#3a3a3a"/>
+      <text x="188" y="18" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#7aa2f7">myrepo.wiki/</text>
+      <line x1="160" y1="14" x2="180" y2="14" stroke="#5a6d8a" stroke-width="1"/>
+    </g>
+  </g>
+</svg>

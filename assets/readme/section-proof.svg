@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="180" viewBox="0 0 1200 180" role="img" aria-labelledby="title desc">
+  <title id="title">markrag proof — hybrid search and trust</title>
+  <desc id="desc">Section banner showing hybrid search flow and trust levels.</desc>
+  <rect width="1200" height="180" rx="20" fill="#0a0a0a"/>
+  <g transform="translate(64 48)">
+    <text x="0" y="0" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="22" font-weight="600" fill="#e8e8e8">Proof</text>
+    <text x="0" y="36" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="14" fill="#9a9a9a">Hybrid search • 1-hop link expansion • Trust model</text>
+  </g>
+  <!-- flow -->
+  <g transform="translate(64 80)">
+    <rect x="0" y="15" width="180" height="60" rx="8" fill="#121212" stroke="#2a2a2a"/>
+    <text x="12" y="35" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13" fill="#b8b8b8">query</text>
+    <text x="12" y="55" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13" fill="#7aa2f7">FTS5</text>
+    <polygon points="190,30 210,30 200,50" fill="#5a6d8a"/>
+    <rect x="220" y="15" width="180" height="60" rx="8" fill="#121212" stroke="#2a2a2a"/>
+    <text x="232" y="35" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13" fill="#b8b8b8">vector</text>
+    <text x="232" y="55" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13" fill="#7aa2f7">RRF</text>
+    <polygon points="410,30 430,30 420,50" fill="#5a6d8a"/>
+    <rect x="440" y="15" width="180" height="60" rx="8" fill="#121212" stroke="#2a2a2a"/>
+    <text x="452" y="35" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13" fill="#b8b8b8">results</text>
+    <text x="452" y="55" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13" fill="#7aa2f7">+ 1-hop</text>
+  </g>
+  <!-- trust -->
+  <g transform="translate(740 48)">
+    <text x="0" y="0" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="14" fill="#7a7a7a">TRUST LEVELS</text>
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13">
+      <text x="0" y="32" fill="#e8e8e8">unverified</text>
+      <text x="0" y="56" fill="#e8e8e8">machine-confirmed</text>
+      <text x="0" y="80" fill="#e8e8e8">human-reviewed</text>
+    </g>
+  </g>
+</svg>

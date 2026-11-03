@@ -1,174 +1,71 @@
 # markrag
 
-OKF-backed RAG MCP server for per-repo wikis.
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paulushcgcj/markrag/HEAD/assets/readme/hero.svg" width="100%" alt="markrag — OKF-backed RAG MCP server for per-repo wikis">
+</p>
 
-**markrag** provides retrieval-augmented generation (RAG) capabilities for AI coding agents by serving a curated knowledge wiki as an MCP server. The wiki follows the [Open Knowledge Format (OKF) v0.2](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) specification.
+> OKF-backed RAG MCP server for per-repo wikis.
 
-## Features
+**markrag** serves a curated knowledge wiki as an MCP server so AI coding agents can retrieve trustworthy, per-repository information. The wiki follows the [Open Knowledge Format (OKF) v0.2](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) specification.
 
-- **OKF v0.2 Compliant**: Full support for OKF bundle structure, frontmatter, and metadata
-- **Hybrid Search**: SQLite FTS5 + vector embeddings with Reciprocal Rank Fusion (RRF)
-- **1-hop Link Expansion**: Automatically includes related concepts from links
-- **3-tier Disclosure Ladder**: Token-efficient responses with tiered information disclosure
-- **Trust Model**: Explicit trust levels (unverified, machine-confirmed, human-reviewed) and staleness tracking
-- **Local-first**: No external services required (uses fastembed for CPU-only embeddings)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## Installation
+## What it is
 
-### Using uv (recommended)
+markrag makes repository knowledge usable by AI agents without external services.
+
+- **OKF v0.2 compliant** — bundle structure, frontmatter, and metadata
+- **Hybrid search** — SQLite FTS5 + vector embeddings with Reciprocal Rank Fusion
+- **Trust model** — unverified / machine-confirmed / human-reviewed with staleness tracking
+
+Local-first by default: CPU embeddings via fastembed, no API keys required.
+
+## Quick start
 
 ```bash
-# Install globally
+# install
 uv tool install markrag
 
-# Or run directly
-uvx markrag
+# create wiki next to your repo
+cd ~/Repos/myorg/myrepo
+markrag init
 
-# Or install in a project
-uv add markrag
-uv sync
+# start MCP server
+markrag serve
 ```
 
-### Using pip
+The `init` command creates a sibling `myrepo.wiki` directory with `index.md`, `home.md`, `log.md` and seed documents from your README and repo structure. The wiki is a plain git repo you can publish to GitHub Wiki or keep in a reviewable PR.
 
-```bash
-pip install markrag
-```
-
-## Usage
-
-### Quick Start
-
-1. Navigate to your repository:
-   ```bash
-   cd ~/Repos/myorg/myrepo
-   ```
-
-2. Initialize the wiki:
-   ```bash
-   markrag init
-   ```
-   This creates a sibling wiki directory at `~/Repos/myorg/myrepo.wiki` with:
-   - `index.md` - Bundle navigation
-   - `home.md` - GitHub Wiki homepage
-   - `log.md` - Change history
-   - Seed documents from README and repo structure
-
-3. Start the MCP server:
-   ```bash
-   markrag serve
-   ```
-
-### MCP Server Configuration
-
-#### OpenCode
-
-Add to your OpenCode MCP configuration:
-
-```json
-{
-  "mcp": {
-    "servers": {
-      "markrag": {
-        "command": "markrag",
-        "args": ["serve"],
-        "env": {
-          "MARKRAG_REPO": "/path/to/your/repo"
-        }
-      }
-    }
-  }
-}
-
-#### Cursor
-
-In Cursor settings, add an MCP server with:
-- Command: `markrag`
-- Arguments: `serve --repo /path/to/your/repo`
-
-#### Claude Code
-
-Add to your `claude_code/config.json`:
-
-```json
-{
-  "mcpServers": {
-    "markrag": {
-      "command": ["markrag", "serve"],
-      "env": {
-        "MARKRAG_REPO": "/path/to/your/repo"
-      }
-    }
-  }
-}
-```
-
-### CLI Commands
-
-```bash
-# Show help
-markrag --help
-
-# Initialize wiki
-markrag init --repo /path/to/repo
-
-# Start MCP server
-markrag serve --repo /path/to/repo
-
-# Search the wiki
-markrag search "database connection" --type Technology --format json
-
-# Read a concept
-markrag read technologies/database --section Configuration
-
-# Show bundle index
-markrag index
-
-# Show bundle statistics
-markrag status
-```
-
-## Configuration
-
-### Environment Variables
+Environment variables:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MARKRAG_REPO` | Path to the repository | Current directory |
-| `MARKRAG_WIKI_REMOTE` | Git remote URL for wiki (used by `init`) | None |
-| `MARKRAG_EMBEDDING_PROVIDER` | Embedding provider: `fastembed` or `openai` | `fastembed` |
-| `MARKRAG_EMBEDDING_MODEL` | Embedding model name | `all-MiniLM-L6-v2` |
-| `MARKRAG_EMBEDDING_BASE_URL` | Base URL for OpenAI-compatible API | None |
-| `MARKRAG_EMBEDDING_API_KEY` | API key for OpenAI-compatible API | None |
+| `MARKRAG_REPO` | Path to repository | current directory |
+| `MARKRAG_WIKI_REMOTE` | Git remote for wiki | — |
+| `MARKRAG_INDEX_DIR` | Search index location | `~/.markrag` |
+| `MARKRAG_EMBEDDINGS` | `off` to disable embeddings | enabled |
+| `MARKRAG_EMBEDDING_PROVIDER` | `fastembed` or `openai` | `fastembed` |
 
-### Embedding Providers
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paulushcgcj/markrag/HEAD/assets/readme/section-proof.svg" width="100%" alt="Proof: hybrid search and trust levels">
+</p>
 
-#### fastembed (default)
-
-Local, CPU-only embeddings using ONNX models. No API key required.
-
-```bash
-# Use default model (all-MiniLM-L6-v2)
-MARKRAG_EMBEDDING_PROVIDER=fastembed markrag serve
-
-# Use a different model
-MARKRAG_EMBEDDING_PROVIDER=fastembed MARKRAG_EMBEDDING_MODEL=BAAI/bge-base-en markrag serve
-```
-
-#### OpenAI-compatible
-
-For OpenAI, Azure, or compatible APIs:
+## Base usage
 
 ```bash
-MARKRAG_EMBEDDING_PROVIDER=openai \
-  MARKRAG_EMBEDDING_BASE_URL=https://api.openai.com/v1 \
-  MARKRAG_EMBEDDING_API_KEY=your-api-key \
-  markrag serve
+markrag --help
+markrag init --repo /path/to/repo
+markrag init --repo /path/to/repo --adopt
+markrag serve --repo /path/to/repo
+markrag search "database connection" --type Technology --format json
+markrag read technologies/database --section Configuration
+markrag index
+markrag status
 ```
 
-## Wiki Structure
+MCP configuration is passed via `MARKRAG_REPO` in your client settings. See the wiki for per-client examples.
 
-The wiki follows the sibling-folder convention:
+## Wiki structure
 
 ```
 ~/Repos/<org>/<repo>/
@@ -176,120 +73,35 @@ The wiki follows the sibling-folder convention:
   src/
   ...
 
-~/Repos/<org>/<repo>.wiki/  # Wiki directory (git repo)
-  index.md           # Bundle navigation (OKF)
-  home.md            # GitHub Wiki homepage
-  log.md             # Change history
+~/Repos/<org>/<repo>.wiki/
+  index.md    # bundle navigation, regenerated
+  home.md     # GitHub Wiki homepage, regenerated
+  log.md      # append-only change history
   technologies/
-    spring-boot.md
-    database.md
   processes/
-    deployment.md
 ```
 
-## Trust Model
+`index.md` and `home.md` are server-managed. Edit documents; markrag regenerates navigation.
 
-markrag implements a strict trust model to ensure AI agents understand the reliability of information:
+## Trust model
 
-### Trust Levels
-
-1. **unverified**: No `verified` field present. Content is generated or unchecked.
-2. **machine-confirmed**: Only agent/process verifiers (`producer/<version>`, `process:<id>`).
-3. **human-reviewed**: At least one human verifier (`human:<id>`).
-
-### Generated Content
-
-All content generated by markrag is automatically stamped with:
-- `generated.by`: The producer (e.g., `markrag/0.1`)
-- `generated.at`: ISO 8601 UTC timestamp
-- `status: draft`
-
-**Important**: Verification is a human act only. markrag will never:
-- Mark generated content as verified
-- Fabricate sources, verification events, or timestamps
-- Claim human review for machine-generated content
-
-### Staleness
-
-Documents can specify a `stale_after` date. markrag will:
-- Flag stale documents in all outputs
-- Include days past stale_after in status
-- Never hard-filter or delete stale content
-
-## MCP Tools
-
-### Tier 0: Bundle Map
-
-**`okf_index(path)`** - Get bundle structure
-- Returns concept IDs, titles, descriptions, types, status, trust level
-- No bodies returned
-- Supports path filtering for subdirectories
-
-### Tier 1: Search
-
-**`okf_search(query, type, tags, status, top_k)`** - Hybrid search
-- FTS5 + vector search with RRF fusion
-- Metadata pre-filtering (type, tags, status)
-- 1-hop link expansion for related concepts
-- Returns ~40-token excerpts (no full bodies)
-
-### Tier 2: Read
-
-**`okf_read(concept_id, section)`** - Full document
-- Returns trust level line and staleness warning
-- Frontmatter summary with sources
-- Full markdown content (or specific section)
-
-### Write
-
-**`okf_write(concept_id, title, description, type, body_markdown, tags, sources)`** - Create/update concept
-- Always stamps `generated.by` and `status: draft`
-- Preserves existing verified history
-- Appends to `log.md`
-- Regenerates `index.md` and `home.md`
-
-### Status
-
-**`okf_status()`** - Bundle statistics
-- Doc count by type, status, trust level
-- List of stale documents with days past
-- Last rebuild time
-
-## Development
-
-### Project Structure
+Every document surfaces a trust line so agents can see reliability:
 
 ```
-src/markrag/
-  __init__.py      # Package init, version
-  __main__.py     # Module entry point
-  cli.py          # CLI commands
-  server.py       # MCP server and tools
-  okf.py          # OKF format handling
-  chunking.py     # Document chunking
-  index.py        # SQLite FTS5 + vector index
-  embeddings.py   # Embedding providers
-
-tests/
-  conftest.py     # Test fixtures
-  test_okf.py     # OKF parsing and conformance
-  test_chunking.py # Chunking logic
-  test_server.py  # MCP server tools
+[Trust: unverified] Generated by markrag/0.1.0 at 2026-07-09T14:30:00Z.
 ```
 
-### Running Tests
+- **unverified** — no `verified` field
+- **machine-confirmed** — agent/process verifiers only
+- **human-reviewed** — at least one human verifier
 
-```bash
-uv run pytest
-uv run pytest tests/test_okf.py -v
-```
+All generated content is stamped `generated.by`, `generated.at`, and `status: draft`. Promotion to stable requires a human reviewer to set `status: stable` and add a `verified` entry. markrag never fabricates verification.
 
-### Building
+## Limits
 
-```bash
-uv sync
-uv build
-```
+- The search index lives outside the wiki and can be deleted; it rebuilds on next search.
+- Embedding models are downloaded on first use.
+- `init --adopt` lets markrag manage an existing wiki without rewriting curated navigation.
 
 ## Contributing
 
