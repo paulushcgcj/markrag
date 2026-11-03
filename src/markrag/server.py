@@ -1,127 +1,284 @@
 """MCP server for markrag - OKF-backed RAG for per-repo wikis.
 
-This module provides the MCP server with tools for:
-- okf_index: Bundle map (tier 0)
-- okf_search: Hybrid FTS+vector search (tier 1)
-- okf_read: Full document retrieval (tier 2)
-- okf_write: Create/update concepts
-- okf_status: Bundle statistics
+Tools exposed to agents:
+
+- ``okf_index``  - tier 0, the bundle map
+- ``okf_search`` - tier 1, hybrid keyword + vector search
+- ``okf_read``   - tier 2, a full document or one section
+- ``okf_write``  - create or update a concept
+- ``okf_status`` - bundle statistics for orientation
+
+Every tool obeys the same disclosure discipline: no bodies outside
+``okf_read``, excerpts capped at roughly forty tokens, and a trust line on
+anything that surfaces a document.
 """
 
 import os
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from markrag import __version__
+from markrag.bootstrap import bootstrap_wiki
+from markrag.bundle_map import write_bundle_map
+from markrag.embeddings import EmbeddingProvider, get_embedding_provider, provider_signature
+from markrag.index import KnowledgeIndex, default_index_path
 from markrag.okf import (
+    RESERVED_FILES,
+    SHELL_FILENAMES,
     Bundle,
     Concept,
     Frontmatter,
-    RESERVED_FILES,
+    Generated,
+    Source,
+    append_log_entry,
     derive_trust_level,
     get_stale_days,
     is_stale,
+    trust_line,
+    wiki_path_for_repo,
 )
 
-# Global state
+# Excerpts outside okf_read are capped at roughly forty tokens.
+EXCERPT_TOKENS = 40
+
+# Global state.
 _bundle: Bundle | None = None
 _bundle_path: Path | None = None
-_index_db_path: Path | None = None
+_index: KnowledgeIndex | None = None
+_index_bundle_path: Path | None = None
+_embedding_provider: EmbeddingProvider | None = None
+_embedding_provider_loaded = False
+
+_CONCEPT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+
+# Files the server owns; a tool call may never write them.
+RESERVED_STEMS = {name.removesuffix(".md").lower() for name in RESERVED_FILES}
 
 
-def _get_bundle(repo_path: str | None = None, wiki_path: Path | None = None) -> Bundle:
-    """Get or create the bundle for the current repo."""
+# ---------------------------------------------------------------------------
+# Bundle and index management
+# ---------------------------------------------------------------------------
+
+
+def _repo_path(repo_path: str | Path | None = None) -> Path:
+    """Resolve the repository path from an argument, the environment, or cwd."""
+    raw = repo_path if repo_path is not None else os.getenv("MARKRAG_REPO", ".")
+    return Path(raw).expanduser().resolve()
+
+
+def _get_bundle(
+    repo_path: str | Path | None = None,
+    *,
+    allow_bootstrap: bool = False,
+) -> Bundle:
+    """Get or load the bundle for the current repository.
+
+    The wiki lives in a sibling ``<name>.wiki`` directory of the repository.
+    When ``allow_bootstrap`` is set and the wiki does not exist yet, it is
+    created and seeded before the bundle is loaded.
+
+    Args:
+        repo_path: Repository path. Defaults to ``MARKRAG_REPO`` or the cwd.
+        allow_bootstrap: Bootstrap the wiki when it is missing.
+
+    Returns:
+        The loaded bundle.
+    """
     global _bundle, _bundle_path
 
-    # If wiki_path is explicitly provided, use it
-    if wiki_path:
-        if _bundle is None or _bundle_path != wiki_path:
-            _bundle_path = wiki_path
-            _bundle = Bundle(root_path=wiki_path)
-            try:
-                _bundle.load()
-            except FileNotFoundError:
-                # Wiki doesn't exist yet - create empty bundle
-                _bundle = Bundle(root_path=wiki_path)
-        return _bundle
+    if repo_path is None and _bundle is not None:
+        return _reload_if_stale(_bundle)
 
-    # Determine repo path
-    if repo_path:
-        repo_path_obj = Path(repo_path)
-    else:
-        repo_path_obj = Path(os.getenv("MARKRAG_REPO", "."))
+    repo = _repo_path(repo_path)
+    wiki = wiki_path_for_repo(repo)
 
-    # Derive wiki path (sibling convention)
-    # If repo is at /path/to/<name>, wiki is at /path/to/<name>.wiki
-    wiki_path = repo_path_obj.with_suffix(".wiki")
+    if _bundle is not None and _bundle_path == wiki:
+        return _reload_if_stale(_bundle)
 
-    # Check if we need to reload
-    if _bundle is None or _bundle_path != wiki_path:
-        _bundle_path = wiki_path
-        _bundle = Bundle(root_path=wiki_path)
-        try:
-            _bundle.load()
-        except FileNotFoundError:
-            # Wiki doesn't exist yet - create empty bundle
-            _bundle = Bundle(root_path=wiki_path)
+    if allow_bootstrap and not any(wiki.rglob("*.md")):
+        # Only a wiki with no documents at all is bootstrapped. A wiki that
+        # already has content is left exactly as it is.
+        bootstrap_wiki(repo, wiki, version=__version__)
 
-    return _bundle
+    bundle = Bundle(root_path=wiki)
+    try:
+        bundle.load()
+    except FileNotFoundError:
+        bundle = Bundle(root_path=wiki)
+
+    _bundle = bundle
+    _bundle_path = wiki
+    return bundle
 
 
-def _get_index_db_path() -> Path:
-    """Get the path to the SQLite index database."""
-    global _index_db_path
+def _reload_if_stale(bundle: Bundle) -> Bundle:
+    """Reload a bundle when its files changed on disk.
 
-    if _index_db_path is None:
-        # Use ~/.markrag/<bundle-name>.db
-        repo_path = Path(os.getenv("MARKRAG_REPO", "."))
-        bundle_name = repo_path.name
-        markrag_dir = Path.home() / ".markrag"
-        markrag_dir.mkdir(parents=True, exist_ok=True)
-        _index_db_path = markrag_dir / f"{bundle_name}.db"
-
-    return _index_db_path
-
-
-def _tokenize_text(text: str, max_tokens: int = 40) -> str:
-    """Tokenize text and truncate to max_tokens.
-
-    Simple whitespace-based tokenization for excerpt generation.
+    The wiki is human-curated ground truth: a document edited outside the
+    server must be visible to the next read.
     """
+    if bundle.is_stale():
+        bundle.load()
+    return bundle
+
+
+def _provider() -> EmbeddingProvider | None:
+    """Return the embedding provider, constructing it once per process."""
+    global _embedding_provider, _embedding_provider_loaded
+    if not _embedding_provider_loaded:
+        _embedding_provider = get_embedding_provider()
+        _embedding_provider_loaded = True
+    return _embedding_provider
+
+
+def _get_index(bundle: Bundle) -> KnowledgeIndex:
+    """Return the search index for a bundle, rebuilding it when stale.
+
+    The index is derived from the Markdown files, so it can always be thrown
+    away. A fingerprint of the bundle's files decides whether a rebuild is
+    needed.
+    """
+    global _index, _index_bundle_path
+
+    bundle_name = bundle.root_path.name.removesuffix(".wiki")
+    if _index is None or _index_bundle_path != bundle.root_path:
+        provider = _provider()
+        _index = KnowledgeIndex(
+            default_index_path(bundle_name),
+            bundle_name,
+            provider=provider,
+            embedding_signature=provider_signature(provider),
+        )
+        _index_bundle_path = bundle.root_path
+
+    if not _index.is_current(bundle):
+        _index.build(bundle)
+
+    return _index
+
+
+def _invalidate_index() -> None:
+    """Force the index to be rebuilt on the next search."""
+    global _index
+    if _index is not None:
+        _index.clear()
+
+
+def _close_index() -> None:
+    """Close the search index and release its database connection."""
+    global _index, _index_bundle_path
+    if _index is not None:
+        _index.close()
+    _index = None
+    _index_bundle_path = None
+
+
+# ---------------------------------------------------------------------------
+# Output helpers
+# ---------------------------------------------------------------------------
+
+
+def _excerpt(text: str, max_tokens: int = EXCERPT_TOKENS) -> str:
+    """Cap text to roughly ``max_tokens`` whitespace-delimited tokens."""
     if not text:
         return ""
-
     words = text.split()
     if len(words) <= max_tokens:
         return text
+    return " ".join(words[:max_tokens]) + "…"
 
-    return " ".join(words[:max_tokens]) + "..."
 
-
-def _generate_trust_line(concept: Concept) -> str:
-    """Generate trust level line for output."""
-    trust = derive_trust_level(concept)
+def _stale_warning(concept: Concept) -> str | None:
+    """Return a staleness warning for a concept, if it is past stale_after."""
+    if not is_stale(concept):
+        return None
     stale_days = get_stale_days(concept)
+    if stale_days:
+        return f"WARNING: Document is {stale_days} days past stale_after"
+    return "WARNING: Document is stale"
 
-    if stale_days is not None:
-        return f"[Trust: {trust} | Stale: {stale_days} days past stale_after]"
-    return f"[Trust: {trust}]"
+
+def _concept_summary(concept: Concept, concept_id: str) -> dict[str, Any]:
+    """Build the shared metadata block for a concept."""
+    frontmatter = concept.frontmatter
+    return {
+        "concept_id": concept_id,
+        "title": concept.title or concept_id,
+        "description": frontmatter.description or "",
+        "type": frontmatter.type,
+        "status": frontmatter.status,
+        "trust_level": derive_trust_level(concept),
+        "stale": is_stale(concept),
+        "trust_line": trust_line(concept),
+    }
 
 
-def _generate_stale_warning(concept: Concept) -> str | None:
-    """Generate staleness warning if applicable."""
-    if is_stale(concept):
-        stale_days = get_stale_days(concept)
-        if stale_days:
-            return f"WARNING: Document is {stale_days} days past stale_after"
-        return "WARNING: Document is stale"
+def _reserved_message(stem: str) -> str:
+    """Explain why a reserved filename cannot be written."""
+    if f"{stem.lower()}.md" in SHELL_FILENAMES:
+        return f"'{stem}.md' is user-facing wiki chrome and cannot be written"
+    return f"'{stem}.md' is server-managed and cannot be written"
+
+
+def _validate_concept_id(concept_id: str) -> str | None:
+    """Validate a concept ID, returning an error message when it is unsafe."""
+    if not concept_id or not concept_id.strip():
+        return "concept_id must not be empty"
+
+    if concept_id.startswith("/") or concept_id.startswith("\\"):
+        return "concept_id must be relative to the bundle root"
+
+    if re.match(r"^[A-Za-z]:", concept_id):
+        return "concept_id must be relative to the bundle root"
+
+    parts = concept_id.replace("\\", "/").split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        return "concept_id must not contain empty, '.' or '..' path segments"
+
+    # Reserved names are reserved at every level of the hierarchy, and the
+    # comparison is case-insensitive: on a case-insensitive filesystem "Index"
+    # and "index.md" are the same file.
+    for part in parts:
+        if part.lower() in RESERVED_STEMS:
+            return _reserved_message(part)
+
+    if not _CONCEPT_ID_RE.match(concept_id):
+        return "concept_id may only contain letters, digits, '.', '_', '-' and '/'"
+
+    if concept_id.endswith(".md"):
+        return "concept_id must not include the '.md' extension"
+
     return None
 
 
-# Create MCP server
+def _log_directories(concept_id: str) -> tuple[str, ...]:
+    """Return the log files a concept's change belongs in.
+
+    A change is recorded in the log of the directory that holds the concept,
+    in the log of each of that directory's ancestors, and in the wiki's root
+    log. The empty string stands for the wiki root.
+
+    Args:
+        concept_id: The concept ID, a path relative to the bundle root.
+
+    Returns:
+        The directories whose ``log.md`` receives the entry.
+    """
+    parts = concept_id.split("/")[:-1]
+    directories = [""]
+    for depth in range(1, len(parts) + 1):
+        directories.append("/".join(parts[:depth]))
+    return tuple(directories)
+
+
+# ---------------------------------------------------------------------------
+# MCP server
+# ---------------------------------------------------------------------------
+
 mcp = FastMCP(
     "markrag",
     instructions="""
@@ -129,25 +286,25 @@ You have access to a curated knowledge wiki for the current repository via markr
 
 ## Usage Rules
 
-1. **Tier 0 (okf_index)**: Get bundle map - concept IDs, titles, descriptions, status. No bodies.
+1. **Tier 0 (okf_index)**: Get the bundle map - concept IDs, titles, descriptions, status. No bodies.
 2. **Tier 1 (okf_search)**: Hybrid search with ~40-token excerpts. Use for discovery.
 3. **Tier 2 (okf_read)**: Full document content. Use when you need the complete information.
 
 ## Trust Model
 
-Every document has a trust level:
-- `unverified`: No verified field present
-- `machine-confirmed`: Only agent/process verifiers (producer/version, process:<id>)
-- `human-reviewed`: At least one human verifier (human:<id>)
+Every document carries a trust level:
+- `unverified`: no `verified` field present
+- `machine-confirmed`: only agent/process verifiers (`producer/version`, `process:<id>`)
+- `human-reviewed`: at least one human verifier (`human:<id>`)
 
-Documents may also be flagged as stale if past their stale_after date.
+Documents may also be flagged as stale when they are past their `stale_after` date.
 
 ## When to use what
 
 - Start with `okf_index` to understand the wiki structure
 - Use `okf_search` to find relevant concepts
 - Use `okf_read` only when you need the full content
-- Always check trust level and staleness before relying on information
+- Always check the trust line and staleness warning before relying on information
 
 ## Important
 
@@ -160,52 +317,38 @@ Documents may also be flagged as stale if past their stale_after date.
 
 @mcp.tool()
 def okf_index(path: str | None = None) -> dict[str, Any]:
-    """Tier 0. Bundle map for root or a subdirectory path.
+    """Tier 0. Bundle map for the root or a subdirectory path.
 
-    Returns each entry as: concept_id, title, description (one line), status.
-    No bodies. Server-managed files (index.md, log.md, home.md) are excluded.
+    Returns each entry as: concept_id, title, description (one line), status,
+    trust level and staleness. No bodies.
 
     Args:
-        path: Optional subdirectory path within the bundle (e.g. 'processes')
+        path: Optional subdirectory path within the bundle (e.g. 'processes').
 
     Returns:
-        Dictionary with 'concepts' list and 'path' info
+        Dictionary with 'concepts' list, the resolved 'path', and a 'count'.
     """
     bundle = _get_bundle()
 
     if path:
-        # Filter to subdirectory
-        prefix = path.rstrip("/") + "/"
-        concepts = [
-            (cid, c) for cid, c in bundle.concepts.items()
-            if cid.startswith(prefix) or cid == path
+        prefix = path.strip("/") + "/"
+        entries = [
+            (concept_id, concept)
+            for concept_id, concept in bundle.concepts.items()
+            if concept_id.startswith(prefix)
         ]
     else:
-        concepts = list(bundle.concepts.items())
+        entries = list(bundle.concepts.items())
 
-    result = []
-    for concept_id, concept in concepts:
-        # Skip reserved files (shouldn't be here, but just in case)
-        if concept.filename in RESERVED_FILES:
-            continue
-
-        trust = derive_trust_level(concept)
-        stale_flag = is_stale(concept)
-
-        result.append({
-            "concept_id": concept_id,
-            "title": concept.frontmatter.title or concept_id,
-            "description": concept.frontmatter.description or "",
-            "type": concept.frontmatter.type,
-            "status": concept.frontmatter.status,
-            "trust_level": trust,
-            "stale": stale_flag,
-        })
+    concepts = [
+        _concept_summary(concept, concept_id)
+        for concept_id, concept in sorted(entries, key=lambda item: item[0])
+    ]
 
     return {
         "path": path or ".",
-        "concepts": result,
-        "count": len(result),
+        "concepts": concepts,
+        "count": len(concepts),
     }
 
 
@@ -214,139 +357,87 @@ def okf_search(
     query: str,
     type_: str | None = None,
     tags: list[str] | None = None,
-    status: str | None = None,
+    status: str | None = "any",
     top_k: int = 8,
 ) -> dict[str, Any]:
-    """Tier 1. Hybrid FTS+vector search with metadata pre-filter and 1-hop link expansion.
+    """Tier 1. Hybrid keyword and vector search with 1-hop link expansion.
 
-    Per hit return: concept_id, title, description, trust_level, stale flag,
-    best-matching section anchor, and a short excerpt (~40 tokens max).
-    Plus 'related': [concept_id + description] from 1-hop links.
-    Never full bodies.
+    Per hit returns: concept_id, title, description, trust level, stale flag,
+    the best-matching section anchor, and a short excerpt of roughly forty
+    tokens. Plus 'related': concept IDs and descriptions reachable in one hop
+    through the document links. Never full bodies.
 
     Args:
-        query: Search query string
-        type_: Filter by concept type (optional)
-        tags: Filter by tags (AND logic) (optional)
-        status: Filter by status: "any", "draft", "stable", "deprecated" (default: "any")
-        top_k: Number of results to return (default: 8)
+        query: Search query string.
+        type_: Restrict results to a concept type.
+        tags: Restrict results to concepts carrying every listed tag.
+        status: Restrict to 'draft', 'stable', 'deprecated', or 'any'.
+        top_k: Maximum number of concepts to return.
 
     Returns:
-        Dictionary with 'results' list and 'stats'
+        Dictionary with 'results' list, 'filters', and retrieval diagnostics.
     """
     bundle = _get_bundle()
 
-    # Build candidate set with metadata filtering
-    candidates = list(bundle.concepts.values())
+    if top_k <= 0:
+        top_k = 1
 
-    # Apply type filter
-    if type_:
-        candidates = [c for c in candidates if c.frontmatter.type == type_]
+    index = _get_index(bundle)
+    response = index.search(
+        query,
+        type_=type_,
+        tags=tags,
+        status=status,
+        top_k=top_k,
+    )
 
-    # Apply status filter
-    if status and status != "any":
-        candidates = [c for c in candidates if c.frontmatter.status == status]
-
-    # Apply tags filter (AND logic)
-    if tags:
-        for tag in tags:
-            candidates = [c for c in candidates if tag in c.frontmatter.tags]
-
-    # Simple keyword-based search for now (FTS5 will be used when index is built)
-    # This is a fallback implementation
-    results = []
-
-    for concept in candidates:
-        # Skip reserved files
-        if concept.filename in RESERVED_FILES:
+    results: list[dict[str, Any]] = []
+    for hit in response.hits:
+        concept = bundle.get_concept(hit.concept_id)
+        if concept is None:
             continue
 
-        # Match against various fields
-        match_score = 0
+        summary = _concept_summary(concept, hit.concept_id)
+        excerpt_source = hit.excerpt_text or concept.frontmatter.description or ""
+        anchor = hit.anchor
 
-        # Title match (high weight)
-        if query.lower() in (concept.frontmatter.title or "").lower():
-            match_score += 10
+        related = [
+            {"concept_id": linked_id, "description": description}
+            for linked_id, description in bundle.get_1hop_links(hit.concept_id)
+        ]
 
-        # Description match
-        if query.lower() in (concept.frontmatter.description or "").lower():
-            match_score += 5
-
-        # Body match
-        if query.lower() in concept.body.lower():
-            match_score += 2
-
-        # Tag match
-        if any(query.lower() in tag.lower() for tag in concept.frontmatter.tags):
-            match_score += 3
-
-        if match_score > 0:
-            trust = derive_trust_level(concept)
-            stale_flag = is_stale(concept)
-
-            # Find best matching section
-            best_section = None
-            if "## " in concept.body:
-                for match in re.finditer(r'^##\s+(.+)$', concept.body, re.MULTILINE):
-                    if query.lower() in match.group(1).lower():
-                        best_section = match.group(1)
-                        break
-
-            # Generate excerpt (~40 tokens)
-            body_for_excerpt = concept.body
-            if best_section:
-                # Find the section content
-                lines = concept.body.split("\n")
-                found = False
-                for i, line in enumerate(lines):
-                    if line.startswith(f"## {best_section}"):
-                        found = True
-                        body_for_excerpt = "\n".join(lines[i:i+10])  # Next 10 lines
-                        break
-
-            excerpt = _tokenize_text(
-                concept.frontmatter.description or body_for_excerpt or "",
-                max_tokens=40
-            )
-
-            # Get 1-hop links
-            related = []
-            linked_ids = concept.extract_links()
-            for linked_id in linked_ids:
-                linked_concept = bundle.get_concept(linked_id)
-                if linked_concept:
-                    related.append({
-                        "concept_id": linked_id,
-                        "description": linked_concept.frontmatter.description or "",
-                    })
-
-            results.append({
-                "concept_id": concept.concept_id,
-                "title": concept.frontmatter.title or concept.concept_id,
-                "description": concept.frontmatter.description or "",
-                "type": concept.frontmatter.type,
-                "status": concept.frontmatter.status,
-                "trust_level": trust,
-                "stale": stale_flag,
-                "best_section": best_section,
-                "excerpt": excerpt,
+        results.append(
+            {
+                **summary,
+                "section": anchor,
+                "excerpt": _excerpt(excerpt_source),
                 "related": related,
-                "score": match_score,
-            })
-
-    # Sort by score (descending)
-    results.sort(key=lambda x: x["score"], reverse=True)
+                "score": round(hit.score, 6),
+                "matched_by": _match_sources(hit),
+            }
+        )
 
     return {
         "query": query,
-        "results": results[:top_k],
+        "results": results,
         "count": len(results),
-        "filters": {
-            "type": type_,
-            "tags": tags,
-            "status": status,
+        "filters": {"type": type_, "tags": tags, "status": status},
+        "retrieval": {
+            "keyword": response.fts_available,
+            "vector": response.vector_available,
+            "candidates": response.candidate_count,
         },
     }
+
+
+def _match_sources(hit: Any) -> list[str]:
+    """Describe which retrieval halves contributed to a hit."""
+    sources: list[str] = []
+    if hit.fts_rank is not None:
+        sources.append("keyword")
+    if hit.vector_rank is not None:
+        sources.append("vector")
+    return sources
 
 
 @mcp.tool()
@@ -354,28 +445,27 @@ def okf_read(
     concept_id: str,
     section: str | None = None,
 ) -> dict[str, Any]:
-    """Tier 2. Full document, or a single ## section when section is given.
+    """Tier 2. Full document, or a single ## section when 'section' is given.
 
-    Output: trust_level line, staleness warning if any, frontmatter summary
-    (sources list), then the Markdown content.
+    The section is matched against the heading text exactly. Output: trust
+    line, staleness warning if any, frontmatter summary with sources, then the
+    Markdown content.
 
     Args:
-        concept_id: The concept ID to read
-        section: Optional section heading to extract (match by heading text)
+        concept_id: The concept ID to read.
+        section: Optional section heading to extract.
 
     Returns:
-        Dictionary with full document content
+        Dictionary with the document content and its trust metadata.
     """
     bundle = _get_bundle()
 
     concept = bundle.get_concept(concept_id)
-
     if concept is None:
-        # Check if this is a reserved file
-        reserved_stems = {f.replace(".md", "") for f in RESERVED_FILES}
+        reserved_stems = {name.removesuffix(".md") for name in RESERVED_FILES}
         if concept_id in reserved_stems:
             return {
-                "error": f"{concept_id} is a server-managed file, not a concept",
+                "error": f"{concept_id} is a reserved navigation file, not a concept",
                 "concept_id": concept_id,
             }
         return {
@@ -383,66 +473,52 @@ def okf_read(
             "concept_id": concept_id,
         }
 
-    # Skip reserved files (should return empty or error)
-    if concept.filename in RESERVED_FILES:
-        return {
-            "error": f"{concept.filename} is a server-managed file, not a concept",
-            "concept_id": concept_id,
-        }
-
-    trust_line = _generate_trust_line(concept)
-    stale_warning = _generate_stale_warning(concept)
-
-    # Build result
     result: dict[str, Any] = {
         "concept_id": concept_id,
         "trust_level": derive_trust_level(concept),
-        "trust_line": trust_line,
+        "trust_line": trust_line(concept),
         "stale": is_stale(concept),
-        "stale_warning": stale_warning,
+        "stale_warning": _stale_warning(concept),
         "frontmatter": concept.frontmatter.to_dict(),
     }
 
-    # Add sources summary
     if concept.frontmatter.sources:
         result["sources"] = [
-            {
-                "id": s.id,
-                "resource": s.resource,
-                "title": s.title,
-            }
-            for s in concept.frontmatter.sources
+            {"id": source.id, "resource": source.resource, "title": source.title}
+            for source in concept.frontmatter.sources
         ]
 
-    # Get content (full or section)
     if section:
-        # Find the section
-        lines = concept.body.split("\n")
-        found = False
-        content_lines = []
-
-        for line in lines:
-            if line.startswith(f"## {section}"):
-                found = True
-                content_lines.append(line)
-            elif found:
-                if line.startswith("## "):
-                    # Hit next section, stop
-                    break
-                content_lines.append(line)
-
-        if found:
-            result["content"] = "\n".join(content_lines)
-            result["section"] = section
-        else:
-            # Section not found, return empty content
-            result["content"] = ""
-            result["section"] = section
+        content = _extract_section(concept, section)
+        result["section"] = section
+        result["content"] = content
+        if not content:
             result["error"] = f"Section '{section}' not found"
     else:
         result["content"] = concept.body
 
     return result
+
+
+def _extract_section(concept: Concept, section: str) -> str:
+    """Extract a single ``##`` section, matching the heading text exactly."""
+    lines = concept.body.split("\n")
+    collected: list[str] = []
+    found = False
+
+    for line in lines:
+        match = re.match(r"^##\s+(.+?)\s*$", line)
+        if match:
+            if found:
+                break
+            if match.group(1) == section:
+                found = True
+                collected.append(line)
+            continue
+        if found:
+            collected.append(line)
+
+    return "\n".join(collected).strip()
 
 
 @mcp.tool()
@@ -457,160 +533,172 @@ def okf_write(
 ) -> dict[str, Any]:
     """Create or update a concept.
 
-    ALWAYS stamps generated{by, at} and status=draft.
-    Updates preserve existing verified history; never add/forge verification.
-    Appends a line to log.md.
-    Regenerates affected index.md and home.md from frontmatter.
+    ALWAYS stamps generated{by, at} and status=draft. An update preserves the
+    existing verification history and any frontmatter fields the caller does
+    not manage; it never adds or forges verification. Every write records the
+    change in the wiki's logs and regenerates every ``index.md`` from the
+    frontmatter.
 
     Args:
-        concept_id: The concept ID (path without .md)
-        title: Concept title
-        description: One-line description
-        type_: Concept type
-        body_markdown: Markdown body content
-        tags: Optional list of tags
-        sources: Optional list of source dictionaries
+        concept_id: The concept ID, a path relative to the bundle root.
+        title: Concept title.
+        description: One-line description.
+        type_: Concept type.
+        body_markdown: Markdown body content.
+        tags: Optional list of tags.
+        sources: Optional list of source dictionaries, each with a 'resource'.
 
     Returns:
-        Dictionary with written concept_id and path
+        Dictionary with the written concept_id and path.
     """
+    error = _validate_concept_id(concept_id)
+    if error is not None:
+        return {"error": error, "concept_id": concept_id, "status": "rejected"}
+
+    source_objects: list[Source] = []
+    for source in sources or []:
+        resource = str(source.get("resource", "")).strip()
+        if not resource:
+            return {
+                "error": f"source '{source.get('id', '')}' is missing a resource",
+                "concept_id": concept_id,
+                "status": "rejected",
+            }
+        source_objects.append(
+            Source(
+                id=str(source.get("id", "")),
+                resource=resource,
+                title=source.get("title"),
+            )
+        )
+
     bundle = _get_bundle()
     wiki_path = bundle.root_path
-
-    # Create wiki directory if it doesn't exist
     wiki_path.mkdir(parents=True, exist_ok=True)
 
-    # Determine file path from concept_id
-    # concept_id uses / as separator, need to convert to OS path
-    concept_path_str = concept_id.replace("/", os.sep)
-    file_path = wiki_path / f"{concept_path_str}.md"
-
-    # Create parent directories if needed
+    file_path = wiki_path / f"{concept_id}.md"
     file_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Prepare frontmatter
-    now = datetime.now(timezone.utc)
-    timestamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-    version = __import__('markrag').__version__
+    existing = bundle.get_concept(concept_id)
+    existing_frontmatter = existing.frontmatter if existing is not None else None
 
-    # Build sources if provided
-    from markrag.okf import Source, Generated, Verified
-    source_objs = []
-    if sources:
-        for s in sources:
-            source_objs.append(Source(
-                id=s.get("id", ""),
-                resource=s.get("resource", ""),
-                title=s.get("title"),
-            ))
+    # Merge against the file on disk, not the cached copy: a human may have
+    # edited the document since the bundle was last loaded.
+    if file_path.exists():
+        try:
+            on_disk = Concept.from_file(file_path, bundle.root_path)
+            existing_frontmatter = on_disk.frontmatter
+        except Exception:
+            existing_frontmatter = existing_frontmatter
 
-    # Check if concept exists and has verified history
-    existing_concept = bundle.get_concept(concept_id)
-    preserved_verified = []
-    if existing_concept:
-        preserved_verified = existing_concept.frontmatter.verified
+    timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    # Create frontmatter
+    # A field the caller did not supply keeps its stored value; an explicit
+    # empty list clears it. Sources and tags are provenance, so a rewrite that
+    # never mentioned them must not silently drop them.
+    if sources is None:
+        resolved_sources = list(existing_frontmatter.sources) if existing_frontmatter else []
+    else:
+        resolved_sources = source_objects
+
+    if tags is None:
+        resolved_tags = list(existing_frontmatter.tags) if existing_frontmatter else []
+    else:
+        resolved_tags = list(tags)
+
     frontmatter = Frontmatter(
         type=type_,
         title=title,
         description=description,
-        tags=tags or [],
-        sources=source_objs,
-        generated=Generated(by=f"markrag/{version}", at=timestamp),
-        verified=preserved_verified,  # Preserve existing verification
+        resource=existing_frontmatter.resource if existing_frontmatter else None,
+        tags=resolved_tags,
+        sources=resolved_sources,
+        generated=Generated(by=f"markrag/{__version__}", at=timestamp),
+        # Verification is a human act: preserve it, never write it.
+        verified=list(existing_frontmatter.verified) if existing_frontmatter else [],
         status="draft",
-        unknown_fields={},
+        stale_after=existing_frontmatter.stale_after if existing_frontmatter else None,
+        # Unknown fields are preserved verbatim across rewrites.
+        unknown_fields=dict(existing_frontmatter.unknown_fields) if existing_frontmatter else {},
+        present_fields=(
+            existing_frontmatter.present_fields if existing_frontmatter else frozenset()
+        ),
     )
 
-    # Create concept
     concept = Concept(
         path=file_path,
         concept_id=concept_id,
         frontmatter=frontmatter,
         body=body_markdown,
     )
+    file_path.write_text(concept.to_markdown(), encoding="utf-8")
 
-    # Write the file
-    markdown_content = concept.to_markdown()
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write(markdown_content)
+    action = "updated" if existing is not None else "created"
+    entry = f"- [{timestamp}] {action}: [{title}](/{concept_id}.md) by markrag"
+    for directory in _log_directories(concept_id):
+        append_log_entry(wiki_path, entry, directory=directory)
 
-    # Append to log.md
-    _append_to_log(wiki_path, concept_id, title, "created" if not existing_concept else "updated")
-
-    # Regenerate index.md and home.md
-    _regenerate_index_and_home(bundle)
-
-    # Reload bundle
     bundle.load()
+    write_bundle_map(bundle)
+    _invalidate_index()
 
     return {
         "concept_id": concept_id,
         "path": str(file_path),
         "status": "written",
+        "action": action,
     }
 
 
 @mcp.tool()
 def okf_status() -> dict[str, Any]:
-    """Bundle stats for the agent's orientation.
+    """Bundle statistics for orientation.
 
-    Returns: doc count by type/status/trust level, stale docs list (id + days past),
-    last rebuild time. Cheap; no bodies.
+    Returns: document counts by type, status and trust level, the list of
+    stale documents with days past, and when the search index was last
+    rebuilt. Cheap; no bodies.
 
     Returns:
-        Dictionary with bundle statistics
+        Dictionary with bundle statistics.
     """
     bundle = _get_bundle()
 
-    # Count by type
     type_counts: dict[str, int] = {}
-    for concept in bundle.concepts.values():
-        if concept.filename in RESERVED_FILES:
-            continue
-        type_ = concept.frontmatter.type
-        type_counts[type_] = type_counts.get(type_, 0) + 1
-
-    # Count by status
     status_counts: dict[str, int] = {}
+    trust_counts: dict[str, int] = {}
+
     for concept in bundle.concepts.values():
-        if concept.filename in RESERVED_FILES:
-            continue
+        type_counts[concept.frontmatter.type] = type_counts.get(concept.frontmatter.type, 0) + 1
         status = concept.frontmatter.status
         status_counts[status] = status_counts.get(status, 0) + 1
-
-    # Count by trust level
-    trust_counts: dict[str, int] = {}
-    for concept in bundle.concepts.values():
-        if concept.filename in RESERVED_FILES:
-            continue
         trust = derive_trust_level(concept)
         trust_counts[trust] = trust_counts.get(trust, 0) + 1
 
-    # Find stale docs
-    stale_docs = []
+    stale_docs: list[dict[str, Any]] = []
     for concept_id, concept in bundle.concepts.items():
-        if concept.filename in RESERVED_FILES:
-            continue
         stale_days = get_stale_days(concept)
         if stale_days is not None:
-            stale_docs.append({
-                "concept_id": concept_id,
-                "title": concept.frontmatter.title or concept_id,
-                "days_past": stale_days,
-            })
+            stale_docs.append(
+                {
+                    "concept_id": concept_id,
+                    "title": concept.title or concept_id,
+                    "days_past": stale_days,
+                }
+            )
+    stale_docs.sort(key=lambda doc: doc["days_past"], reverse=True)
 
-    # Sort stale docs by days past (descending)
-    stale_docs.sort(key=lambda x: x["days_past"], reverse=True)
-
-    # Last rebuild time (file modification time of index)
     index_path = bundle.root_path / "index.md"
     last_rebuild = None
     if index_path.exists():
-        last_rebuild = datetime.fromtimestamp(
-            index_path.stat().st_mtime, tz=timezone.utc
-        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        last_rebuild = datetime.fromtimestamp(index_path.stat().st_mtime, tz=UTC).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+
+    index_built = None
+    vectors = False
+    if _index is not None and _index_bundle_path == bundle.root_path:
+        index_built = _index.fingerprint()
+        vectors = _index.vectors_available()
 
     return {
         "total_docs": len(bundle.concepts),
@@ -620,134 +708,26 @@ def okf_status() -> dict[str, Any]:
         "stale_docs": stale_docs,
         "stale_count": len(stale_docs),
         "last_rebuild": last_rebuild,
+        "index": {
+            "built": index_built is not None,
+            "vectors": vectors,
+        },
     }
 
 
-# Helper functions for write operations
-
-def _append_to_log(wiki_path: Path, concept_id: str, title: str, action: str) -> None:
-    """Append an entry to log.md."""
-    log_path = wiki_path / "log.md"
-    now = datetime.now(timezone.utc)
-    timestamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    entry = f"- [{timestamp}] {action}: [{title}](/{concept_id}.md)\n"
-
-    if log_path.exists():
-        with open(log_path, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        # Check if we need to add header
-        if not content.strip().startswith("#"):
-            content = "# Change Log\n\n" + content
-
-        # Check if we need to add a newline
-        if not content.endswith("\n"):
-            content += "\n"
-
-        content += entry
-
-        with open(log_path, "w", encoding="utf-8") as f:
-            f.write(content)
-    else:
-        with open(log_path, "w", encoding="utf-8") as f:
-            f.write("# Change Log\n\n")
-            f.write(entry)
-
-
-def _regenerate_index_and_home(bundle: Bundle) -> None:
-    """Regenerate index.md and home.md from the bundle."""
-    wiki_path = bundle.root_path
-
-    # Reload to get latest state
-    bundle.load()
-
-    # Generate index.md content
-    index_content = """---
-okf_version: "0.2"
----
-
-# Bundle Index
-
-"""
-
-    # Group concepts by directory
-    from collections import defaultdict
-    dirs: dict[str, list[tuple[str, Concept]]] = defaultdict(list)
-
-    for concept_id, concept in bundle.concepts.items():
-        if concept.filename in RESERVED_FILES:
-            continue
-
-        # Get directory path
-        if "/" in concept_id:
-            dir_path = concept_id.rsplit("/", 1)[0]
-        else:
-            dir_path = "."
-
-        dirs[dir_path].append((concept_id, concept))
-
-    # Write root-level concepts
-    root_key = "."
-    if root_key in dirs:
-        index_content += "## Root\n\n"
-        for concept_id, concept in sorted(dirs[root_key], key=lambda x: x[1].frontmatter.title or x[0]):
-            trust = derive_trust_level(concept)
-            stale = is_stale(concept)
-            stale_marker = " (stale)" if stale else ""
-            index_content += f"- [{concept.frontmatter.title or concept_id}](/{concept_id}.md) | {concept.frontmatter.type} | {concept.frontmatter.status} | {trust}{stale_marker}\n"
-        index_content += "\n"
-        del dirs[root_key]
-
-    # Write subdirectories
-    for dir_path in sorted(dirs.keys()):
-        index_content += f"## {dir_path}\n\n"
-        for concept_id, concept in sorted(dirs[dir_path], key=lambda x: x[1].frontmatter.title or x[0]):
-            trust = derive_trust_level(concept)
-            stale = is_stale(concept)
-            stale_marker = " (stale)" if stale else ""
-            index_content += f"- [{concept.frontmatter.title or concept_id}](/{concept_id}.md) | {concept.frontmatter.type} | {concept.frontmatter.status} | {trust}{stale_marker}\n"
-        index_content += "\n"
-
-    # Write index.md
-    with open(wiki_path / "index.md", "w", encoding="utf-8") as f:
-        f.write(index_content)
-
-    # Generate home.md content (GitHub Wiki compatible)
-    home_content = "# Wiki Home\n\n"
-    home_content += "This is the GitHub Wiki for the repository.\n\n"
-    home_content += "## Navigation\n\n"
-
-    # Write all concepts as a flat list for home.md
-    for concept_id, concept in sorted(
-        bundle.concepts.items(),
-        key=lambda x: x[1].frontmatter.title or x[0]
-    ):
-        if concept.filename in RESERVED_FILES:
-            continue
-        trust = derive_trust_level(concept)
-        stale = is_stale(concept)
-        stale_marker = " (stale)" if stale else ""
-        # Use relative links without leading /
-        link = concept_id.replace("/", "/") + ".md"
-        home_content += f"- [{concept.frontmatter.title or concept_id}]({link}) | {concept.frontmatter.type} | {concept.frontmatter.status} | {trust}{stale_marker}\n"
-
-    home_content += "\n"
-
-    # Write home.md
-    with open(wiki_path / "home.md", "w", encoding="utf-8") as f:
-        f.write(home_content)
-
-
 def main() -> None:
-    """Run the MCP server."""
-    # Get repo path from env or default
-    repo_path = os.getenv("MARKRAG_REPO", ".")
+    """Run the MCP server over stdio."""
+    repo = _repo_path()
 
-    # Initialize bundle (will create empty if doesn't exist)
-    _get_bundle(repo_path)
+    # First run bootstraps the wiki when the sibling folder is missing.
+    bundle = _get_bundle(repo, allow_bootstrap=True)
 
-    # Run the server
+    # Build the search index up front so the first tool call is fast.
+    try:
+        _get_index(bundle)
+    except Exception:  # pragma: no cover - index failures must not stop serving
+        pass
+
     mcp.run()
 
 

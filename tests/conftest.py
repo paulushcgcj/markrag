@@ -1,9 +1,34 @@
 """Pytest configuration for markrag tests."""
 
+import os
 import tempfile
 from pathlib import Path
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def isolated_environment(monkeypatch, tmp_path):
+    """Keep every test independent of the developer's machine.
+
+    The search index is written outside the wiki, so it is redirected into the
+    test's temporary directory. Local embeddings are disabled so the suite
+    never downloads a model; the index tests inject a deterministic provider
+    instead.
+    """
+    monkeypatch.setenv("MARKRAG_INDEX_DIR", str(tmp_path / "index"))
+    monkeypatch.setenv("MARKRAG_EMBEDDINGS", "off")
+
+    import markrag.server as server_module
+
+    server_module._bundle = None
+    server_module._bundle_path = None
+    server_module._index = None
+    server_module._index_bundle_path = None
+    server_module._embedding_provider = None
+    server_module._embedding_provider_loaded = True
+    yield
+    server_module._close_index()
 
 
 @pytest.fixture
@@ -54,17 +79,16 @@ Configuration properties can be defined in application.properties.
 @pytest.fixture
 def sample_bundle(temp_wiki_dir):
     """Create a sample bundle with multiple concepts.
-    
+
     Creates a proper repo structure: temp_wiki_dir is the wiki directory,
     and we create a sibling repo directory to satisfy the sibling convention.
     """
     from markrag.okf import Bundle
-    import os
 
     # Create a sibling repo directory (without .wiki suffix)
     repo_dir = temp_wiki_dir.parent / "testrepo"
     repo_dir.mkdir(exist_ok=True)
-    
+
     # Rename temp_wiki_dir to be the .wiki directory (sibling of repo_dir)
     actual_wiki_dir = temp_wiki_dir.parent / "testrepo.wiki"
     temp_wiki_dir.rename(actual_wiki_dir)
@@ -92,7 +116,9 @@ okf_version: "0.2"
 
     # Create sample concepts
     concepts = [
-        ("technologies/spring-boot", """---
+        (
+            "technologies/spring-boot",
+            """---
 type: Technology
 title: Spring Boot
 description: Java framework for building applications
@@ -104,8 +130,11 @@ generated: {by: markrag/0.1, at: 2026-07-09T14:30:00Z}
 # Spring Boot
 
 Great framework.
-"""),
-        ("technologies/database", """---
+""",
+        ),
+        (
+            "technologies/database",
+            """---
 type: Technology
 title: Database
 description: Data storage and retrieval
@@ -121,8 +150,11 @@ Stores data.
 ## SQL
 
 Structured Query Language.
-"""),
-        ("processes/deployment", """---
+""",
+        ),
+        (
+            "processes/deployment",
+            """---
 type: Process
 title: Deployment
 description: How to deploy applications
@@ -135,7 +167,8 @@ generated: {by: markrag/0.1, at: 2026-07-09T14:30:00Z}
 # Deployment
 
 Deploy to production.
-"""),
+""",
+        ),
     ]
 
     for concept_id, content in concepts:

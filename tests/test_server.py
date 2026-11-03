@@ -1,19 +1,16 @@
 """Tests for MCP server tools."""
 
-import json
 import os
 from pathlib import Path
 
 import pytest
 
-from markrag.okf import Bundle
 from markrag.server import (
     okf_index,
     okf_read,
     okf_search,
     okf_status,
     okf_write,
-    _get_bundle,
 )
 
 
@@ -24,6 +21,7 @@ class TestOkfIndex:
         """Test indexing all concepts."""
         # Temporarily set the global bundle
         import markrag.server as server_module
+
         server_module._bundle = sample_bundle
         server_module._bundle_path = sample_bundle.root_path
 
@@ -43,6 +41,7 @@ class TestOkfIndex:
     def test_index_filter_by_path(self, sample_bundle):
         """Test filtering index by path."""
         import markrag.server as server_module
+
         server_module._bundle = sample_bundle
         server_module._bundle_path = sample_bundle.root_path
 
@@ -55,6 +54,7 @@ class TestOkfIndex:
     def test_index_trust_level(self, sample_bundle):
         """Test that index includes trust level."""
         import markrag.server as server_module
+
         server_module._bundle = sample_bundle
         server_module._bundle_path = sample_bundle.root_path
 
@@ -67,6 +67,7 @@ class TestOkfIndex:
     def test_index_stale_flag(self, sample_bundle):
         """Test that index includes stale flag."""
         import markrag.server as server_module
+
         server_module._bundle = sample_bundle
         server_module._bundle_path = sample_bundle.root_path
 
@@ -82,6 +83,7 @@ class TestOkfSearch:
     def test_search_basic(self, sample_bundle):
         """Test basic search."""
         import markrag.server as server_module
+
         server_module._bundle = sample_bundle
         server_module._bundle_path = sample_bundle.root_path
 
@@ -95,6 +97,7 @@ class TestOkfSearch:
     def test_search_type_filter(self, sample_bundle):
         """Test search with type filter."""
         import markrag.server as server_module
+
         server_module._bundle = sample_bundle
         server_module._bundle_path = sample_bundle.root_path
 
@@ -106,6 +109,7 @@ class TestOkfSearch:
     def test_search_status_filter(self, sample_bundle):
         """Test search with status filter."""
         import markrag.server as server_module
+
         server_module._bundle = sample_bundle
         server_module._bundle_path = sample_bundle.root_path
 
@@ -117,6 +121,7 @@ class TestOkfSearch:
     def test_search_top_k(self, sample_bundle):
         """Test search with top_k limit."""
         import markrag.server as server_module
+
         server_module._bundle = sample_bundle
         server_module._bundle_path = sample_bundle.root_path
 
@@ -127,6 +132,7 @@ class TestOkfSearch:
     def test_search_excerpt_length(self, sample_bundle):
         """Test that excerpts are limited."""
         import markrag.server as server_module
+
         server_module._bundle = sample_bundle
         server_module._bundle_path = sample_bundle.root_path
 
@@ -155,6 +161,7 @@ See [Spring Boot](/technologies/spring-boot.md).
         sample_bundle.load()
 
         import markrag.server as server_module
+
         server_module._bundle = sample_bundle
         server_module._bundle_path = sample_bundle.root_path
 
@@ -172,6 +179,7 @@ class TestOkfRead:
     def test_read_concept(self, sample_bundle):
         """Test reading a concept."""
         import markrag.server as server_module
+
         server_module._bundle = sample_bundle
         server_module._bundle_path = sample_bundle.root_path
 
@@ -186,6 +194,7 @@ class TestOkfRead:
     def test_read_nonexistent_concept(self, sample_bundle):
         """Test reading a non-existent concept."""
         import markrag.server as server_module
+
         server_module._bundle = sample_bundle
         server_module._bundle_path = sample_bundle.root_path
 
@@ -196,17 +205,19 @@ class TestOkfRead:
     def test_read_reserved_file(self, sample_bundle):
         """Test reading a reserved file."""
         import markrag.server as server_module
+
         server_module._bundle = sample_bundle
         server_module._bundle_path = sample_bundle.root_path
 
         result = okf_read(concept_id="index")
 
         assert "error" in result
-        assert "server-managed" in result["error"]
+        assert "reserved" in result["error"]
 
     def test_read_section(self, sample_bundle):
         """Test reading a specific section."""
         import markrag.server as server_module
+
         server_module._bundle = sample_bundle
         server_module._bundle_path = sample_bundle.root_path
 
@@ -220,6 +231,7 @@ class TestOkfRead:
     def test_read_trust_line(self, sample_bundle):
         """Test that trust line is included."""
         import markrag.server as server_module
+
         server_module._bundle = sample_bundle
         server_module._bundle_path = sample_bundle.root_path
 
@@ -249,6 +261,7 @@ Content.
         sample_bundle.load()
 
         import markrag.server as server_module
+
         server_module._bundle = sample_bundle
         server_module._bundle_path = sample_bundle.root_path
 
@@ -265,6 +278,7 @@ class TestOkfWrite:
     def test_write_new_concept(self, temp_wiki_dir):
         """Test writing a new concept."""
         import markrag.server as server_module
+
         server_module._bundle = None
         server_module._bundle_path = None
 
@@ -288,7 +302,7 @@ class TestOkfWrite:
         assert file_path.exists()
 
         # Verify content
-        with open(file_path, "r") as f:
+        with open(file_path) as f:
             content = f.read()
 
         assert "type: Test" in content
@@ -315,13 +329,14 @@ Existing content.
             f.write(content)
 
         import markrag.server as server_module
+
         server_module._bundle = None
         server_module._bundle_path = None
 
         os.environ["MARKRAG_REPO"] = str(temp_wiki_dir.parent / "test")
 
         # Write to update the concept
-        result = okf_write(
+        okf_write(
             concept_id="existing",
             title="Updated",
             description="Updated description",
@@ -330,7 +345,7 @@ Existing content.
         )
 
         # Verify file was updated
-        with open(file_path, "r") as f:
+        with open(file_path) as f:
             content = f.read()
 
         # Should preserve verified
@@ -340,6 +355,7 @@ Existing content.
     def test_write_stamps_generated(self, temp_wiki_dir):
         """Test that write always stamps generated metadata."""
         import markrag.server as server_module
+
         server_module._bundle = None
         server_module._bundle_path = None
 
@@ -354,7 +370,7 @@ Existing content.
         )
 
         file_path = Path(result["path"])
-        with open(file_path, "r") as f:
+        with open(file_path) as f:
             content = f.read()
 
         assert "generated:" in content
@@ -364,6 +380,7 @@ Existing content.
     def test_write_appends_to_log(self, temp_wiki_dir):
         """Test that write appends to log.md."""
         import markrag.server as server_module
+
         server_module._bundle = None
         server_module._bundle_path = None
 
@@ -381,10 +398,388 @@ Existing content.
         log_path = temp_wiki_dir / "log.md"
         assert log_path.exists()
 
-        with open(log_path, "r") as f:
+        with open(log_path) as f:
             log_content = f.read()
 
         assert "first" in log_content.lower() or "created" in log_content.lower()
+
+    def test_write_updates_the_directory_log(self, temp_wiki_dir):
+        """A write is recorded in the log of every directory it touches."""
+        import markrag.server as server_module
+
+        server_module._bundle = None
+        server_module._bundle_path = None
+
+        os.environ["MARKRAG_REPO"] = str(temp_wiki_dir.parent / "test")
+
+        okf_write(
+            concept_id="kb/frontend/guide",
+            title="Guide",
+            description="A frontend guide",
+            type_="Test",
+            body_markdown="Content",
+        )
+
+        for relative in ("log.md", "kb/log.md", "kb/frontend/log.md"):
+            log_path = temp_wiki_dir / relative
+            assert log_path.exists(), f"missing {relative}"
+            assert "guide" in log_path.read_text(encoding="utf-8").lower()
+
+    def test_write_regenerates_every_index(self, temp_wiki_dir):
+        """A write refreshes the root index and the directory indexes."""
+        import markrag.server as server_module
+
+        server_module._bundle = None
+        server_module._bundle_path = None
+
+        os.environ["MARKRAG_REPO"] = str(temp_wiki_dir.parent / "test")
+
+        okf_write(
+            concept_id="kb/frontend/guide",
+            title="Guide",
+            description="A frontend guide",
+            type_="Test",
+            body_markdown="Content",
+        )
+
+        root_index = (temp_wiki_dir / "index.md").read_text(encoding="utf-8")
+        directory_index = (temp_wiki_dir / "kb" / "frontend" / "index.md").read_text(
+            encoding="utf-8"
+        )
+
+        assert "/kb/frontend/guide.md" in root_index
+        assert "/kb/frontend/guide.md" in directory_index
+
+    def test_write_never_touches_the_home_page(self, temp_wiki_dir):
+        """home.md belongs to the user and is never rewritten."""
+        import markrag.server as server_module
+
+        server_module._bundle = None
+        server_module._bundle_path = None
+
+        os.environ["MARKRAG_REPO"] = str(temp_wiki_dir.parent / "test")
+
+        home_path = temp_wiki_dir / "Home.md"
+        home_path.write_text("# Hand written home\n", encoding="utf-8")
+
+        okf_write(
+            concept_id="first",
+            title="First",
+            description="First concept",
+            type_="Test",
+            body_markdown="Content",
+        )
+
+        assert home_path.read_text(encoding="utf-8") == "# Hand written home\n"
+
+
+class TestOkfWriteHardening:
+    """Test the write path's rejection and preservation rules."""
+
+    @pytest.mark.parametrize(
+        "concept_id",
+        [
+            "../escape",
+            "nested/../../escape",
+            "/absolute/path",
+            "..",
+            ".",
+            "",
+        ],
+    )
+    def test_write_rejects_path_traversal(self, temp_wiki_dir, concept_id):
+        """A concept ID can never escape the wiki directory."""
+        import markrag.server as server_module
+
+        server_module._bundle = None
+        server_module._bundle_path = None
+        os.environ["MARKRAG_REPO"] = str(temp_wiki_dir.parent / "test")
+
+        result = okf_write(
+            concept_id=concept_id,
+            title="Traversal",
+            description="Attempt to escape",
+            type_="Test",
+            body_markdown="Content",
+        )
+
+        assert "error" in result
+        assert not (temp_wiki_dir.parent / "escape.md").exists()
+
+    def test_write_rejects_reserved_files(self, temp_wiki_dir):
+        """Server-managed files are never written by a tool call."""
+        import markrag.server as server_module
+
+        server_module._bundle = None
+        server_module._bundle_path = None
+        os.environ["MARKRAG_REPO"] = str(temp_wiki_dir.parent / "test")
+
+        for reserved in ("index", "home", "log"):
+            result = okf_write(
+                concept_id=reserved,
+                title="Reserved",
+                description="Attempt to overwrite",
+                type_="Test",
+                body_markdown="Content",
+            )
+            assert "error" in result
+
+    def test_write_rejects_the_github_shell_pages(self, temp_wiki_dir):
+        """The wiki's chrome cannot be clobbered by a tool call."""
+        import markrag.server as server_module
+
+        server_module._bundle = None
+        server_module._bundle_path = None
+        os.environ["MARKRAG_REPO"] = str(temp_wiki_dir.parent / "test")
+
+        for shell in ("_Sidebar", "_Footer", "_Header"):
+            result = okf_write(
+                concept_id=shell,
+                title="Shell",
+                description="Attempt to overwrite",
+                type_="Test",
+                body_markdown="Content",
+            )
+            assert "error" in result
+            assert "chrome" in result["error"]
+            assert not (temp_wiki_dir / f"{shell}.md").exists()
+
+    def test_write_rejects_reserved_names_at_any_depth(self, temp_wiki_dir):
+        """A directory index cannot be overwritten through a nested path."""
+        import markrag.server as server_module
+
+        server_module._bundle = None
+        server_module._bundle_path = None
+        os.environ["MARKRAG_REPO"] = str(temp_wiki_dir.parent / "test")
+
+        for reserved in ("kb/index", "kb/log", "kb/home"):
+            result = okf_write(
+                concept_id=reserved,
+                title="Reserved",
+                description="Attempt to overwrite",
+                type_="Test",
+                body_markdown="Content",
+            )
+            assert "error" in result
+            assert not (temp_wiki_dir / f"{reserved}.md").exists()
+
+    def test_write_rejects_reserved_names_case_insensitively(self, temp_wiki_dir):
+        """On a case-insensitive filesystem, "Index" is "index.md"."""
+        import markrag.server as server_module
+
+        server_module._bundle = None
+        server_module._bundle_path = None
+        os.environ["MARKRAG_REPO"] = str(temp_wiki_dir.parent / "test")
+
+        for reserved in ("Index", "LOG", "Home"):
+            result = okf_write(
+                concept_id=reserved,
+                title="Reserved",
+                description="Attempt to overwrite",
+                type_="Test",
+                body_markdown="Content",
+            )
+            assert "error" in result
+            assert "cannot be written" in result["error"]
+
+    def test_write_preserves_unknown_frontmatter_fields(self, temp_wiki_dir):
+        """Fields markrag does not understand survive a write untouched."""
+        import markrag.server as server_module
+
+        server_module._bundle = None
+        server_module._bundle_path = None
+        os.environ["MARKRAG_REPO"] = str(temp_wiki_dir.parent / "test")
+
+        file_path = temp_wiki_dir / "custom.md"
+        file_path.write_text(
+            """---
+type: Test
+title: Custom
+custom_field: keep-me
+another_field:
+  nested: value
+---
+
+Original body.
+""",
+            encoding="utf-8",
+        )
+
+        okf_write(
+            concept_id="custom",
+            title="Custom Updated",
+            description="Updated description",
+            type_="Test",
+            body_markdown="# Custom Updated\n\nNew body.",
+        )
+
+        import frontmatter
+
+        metadata = dict(frontmatter.load(file_path).metadata)
+        assert metadata["custom_field"] == "keep-me"
+        assert metadata["another_field"] == {"nested": "value"}
+
+    def test_write_preserves_sources_and_stale_after(self, temp_wiki_dir):
+        """Provenance and expiry metadata survive a write."""
+        import markrag.server as server_module
+
+        server_module._bundle = None
+        server_module._bundle_path = None
+        os.environ["MARKRAG_REPO"] = str(temp_wiki_dir.parent / "test")
+
+        file_path = temp_wiki_dir / "sourced.md"
+        file_path.write_text(
+            """---
+type: Test
+title: Sourced
+stale_after: 2030-01-01T00:00:00Z
+sources:
+  - id: src1
+    resource: https://example.com/doc
+    title: Example
+---
+
+Original body.
+""",
+            encoding="utf-8",
+        )
+
+        okf_write(
+            concept_id="sourced",
+            title="Sourced Updated",
+            description="Updated description",
+            type_="Test",
+            body_markdown="# Sourced Updated\n\nNew body.",
+        )
+
+        import frontmatter
+
+        metadata: dict[str, object] = dict(frontmatter.load(file_path).metadata)
+        assert metadata["stale_after"] == "2030-01-01T00:00:00Z"
+        sources = metadata["sources"]
+        assert isinstance(sources, list)
+        assert sources[0]["resource"] == "https://example.com/doc"
+
+    def test_write_never_creates_verification(self, temp_wiki_dir):
+        """A write must never claim the content was verified."""
+        import markrag.server as server_module
+
+        server_module._bundle = None
+        server_module._bundle_path = None
+        os.environ["MARKRAG_REPO"] = str(temp_wiki_dir.parent / "test")
+
+        result = okf_write(
+            concept_id="unverified",
+            title="Unverified",
+            description="Written by a tool",
+            type_="Test",
+            body_markdown="Content",
+        )
+
+        import frontmatter
+
+        metadata = dict(frontmatter.load(Path(result["path"])).metadata)
+        assert not metadata.get("verified")
+
+    def test_write_resets_status_to_draft(self, temp_wiki_dir):
+        """Rewriting a stable document sends it back to draft."""
+        import markrag.server as server_module
+
+        server_module._bundle = None
+        server_module._bundle_path = None
+        os.environ["MARKRAG_REPO"] = str(temp_wiki_dir.parent / "test")
+
+        file_path = temp_wiki_dir / "stable.md"
+        file_path.write_text(
+            "---\ntype: Test\ntitle: Stable\nstatus: stable\n---\n\nBody.\n",
+            encoding="utf-8",
+        )
+
+        okf_write(
+            concept_id="stable",
+            title="Stable",
+            description="Rewritten",
+            type_="Test",
+            body_markdown="# Stable\n\nRewritten body.",
+        )
+
+        import frontmatter
+
+        assert dict(frontmatter.load(file_path).metadata)["status"] == "draft"
+
+    def test_write_rejects_a_source_without_a_resource(self, temp_wiki_dir):
+        """A source that points nowhere is rejected."""
+        import markrag.server as server_module
+
+        server_module._bundle = None
+        server_module._bundle_path = None
+        os.environ["MARKRAG_REPO"] = str(temp_wiki_dir.parent / "test")
+
+        result = okf_write(
+            concept_id="badsource",
+            title="Bad Source",
+            description="Source has no resource",
+            type_="Test",
+            body_markdown="Content",
+            sources=[{"id": "src1", "title": "No resource"}],
+        )
+
+        assert "error" in result
+
+
+class TestSectionRead:
+    """Test exact section matching."""
+
+    def test_read_section_is_exact(self, sample_bundle):
+        """A section name must match the heading exactly."""
+        import markrag.server as server_module
+
+        server_module._bundle = sample_bundle
+        server_module._bundle_path = sample_bundle.root_path
+
+        result = okf_read(concept_id="technologies/database", section="SQL")
+        assert "error" not in result
+        assert "Structured Query Language" in result["content"]
+
+    def test_read_unknown_section_is_reported(self, sample_bundle):
+        """A missing section is an error, not an empty document."""
+        import markrag.server as server_module
+
+        server_module._bundle = sample_bundle
+        server_module._bundle_path = sample_bundle.root_path
+
+        result = okf_read(concept_id="technologies/database", section="No Such Section")
+        assert "error" in result
+
+    def test_read_section_does_not_leak_other_sections(self, sample_bundle):
+        """Reading one section returns only that section."""
+        import markrag.server as server_module
+
+        (sample_bundle.root_path / "technologies" / "two-sections.md").write_text(
+            """---
+type: Technology
+title: Two Sections
+description: A concept with two sections
+---
+
+## First
+
+The first section body.
+
+## Second
+
+The second section body.
+""",
+            encoding="utf-8",
+        )
+        sample_bundle.load()
+
+        server_module._bundle = sample_bundle
+        server_module._bundle_path = sample_bundle.root_path
+
+        result = okf_read(concept_id="technologies/two-sections", section="First")
+        assert "The first section body." in result["content"]
+        assert "The second section body." not in result["content"]
 
 
 class TestOkfStatus:
@@ -393,6 +788,7 @@ class TestOkfStatus:
     def test_status_basic(self, sample_bundle):
         """Test basic status."""
         import markrag.server as server_module
+
         server_module._bundle = sample_bundle
         server_module._bundle_path = sample_bundle.root_path
 
@@ -407,6 +803,7 @@ class TestOkfStatus:
     def test_status_by_type(self, sample_bundle):
         """Test status by type."""
         import markrag.server as server_module
+
         server_module._bundle = sample_bundle
         server_module._bundle_path = sample_bundle.root_path
 
@@ -420,6 +817,7 @@ class TestOkfStatus:
     def test_status_by_trust_level(self, sample_bundle):
         """Test status by trust level."""
         import markrag.server as server_module
+
         server_module._bundle = sample_bundle
         server_module._bundle_path = sample_bundle.root_path
 
@@ -447,6 +845,7 @@ Old content.
         sample_bundle.load()
 
         import markrag.server as server_module
+
         server_module._bundle = sample_bundle
         server_module._bundle_path = sample_bundle.root_path
 
@@ -464,6 +863,7 @@ class TestDisclosureLadder:
     def test_tier0_no_bodies(self, sample_bundle):
         """Test that tier 0 (index) returns no bodies."""
         import markrag.server as server_module
+
         server_module._bundle = sample_bundle
         server_module._bundle_path = sample_bundle.root_path
 
@@ -476,6 +876,7 @@ class TestDisclosureLadder:
     def test_tier1_no_full_bodies(self, sample_bundle):
         """Test that tier 1 (search) returns no full bodies."""
         import markrag.server as server_module
+
         server_module._bundle = sample_bundle
         server_module._bundle_path = sample_bundle.root_path
 
@@ -491,6 +892,7 @@ class TestDisclosureLadder:
     def test_tier2_full_content(self, sample_bundle):
         """Test that tier 2 (read) can return full content."""
         import markrag.server as server_module
+
         server_module._bundle = sample_bundle
         server_module._bundle_path = sample_bundle.root_path
 
