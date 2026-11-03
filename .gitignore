@@ -24,6 +24,7 @@ htmlcov/
 *.egg-info/
 .dists/
 build/
+dist/
 
 # Local markrag cache
 .markrag/

@@ -1,0 +1,210 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions: {}
+
+jobs:
+  # ── 1. Generate changelog ─────────────────────────────────────────────────
+  changelog:
+    name: Generate changelog
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      release_body: ${{ steps.cliff.outputs.content }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history required by git-cliff
+
+      - name: Generate release notes with git-cliff
+        id: cliff
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+        env:
+          OUTPUT: CHANGES.md
+          GITHUB_REPO: ${{ github.repository }}
+
+  # ── 2. Build standalone binaries (PyInstaller) ────────────────────────────
+  build-binaries:
+    name: Build binary (${{ matrix.os }})
+    needs: changelog
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset_name: markrag-linux-x86_64
+            artifact_suffix: linux-x86_64
+          - os: macos-15-intel       # Intel runner — covers x86_64 Mac users
+            asset_name: markrag-macos-x86_64
+            artifact_suffix: macos-x86_64
+          - os: macos-latest         # Apple Silicon (M-series)
+            asset_name: markrag-macos-aarch64
+            artifact_suffix: macos-aarch64
+          - os: windows-latest
+            asset_name: markrag-windows-x86_64.exe
+            artifact_suffix: windows-x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Update version to match tag
+        shell: bash
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          sed -i.bak "s/^version = \".*\"/version = \"${TAG_VERSION}\"/" pyproject.toml
+          rm -f pyproject.toml.bak
+          uv lock
+
+      - name: Install project + PyInstaller
+        # --frozen ensures CI uses the freshly locked uv.lock exactly — no silent dep drift
+        run: uv sync --frozen --all-extras --group dev
+
+      - name: Build binary (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          uv run pyinstaller \
+            --onefile \
+            --name "${{ matrix.asset_name }}" \
+            --hidden-import fastembed \
+            src/markrag/cli.py
+
+      - name: Build binary (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          uv run pyinstaller \
+            --onefile \
+            --name "${{ matrix.asset_name }}" \
+            --hidden-import fastembed \
+            src/markrag/cli.py
+
+      - name: Build binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          uv run pyinstaller `
+            --onefile `
+            --name "${{ matrix.asset_name }}" `
+            --hidden-import fastembed `
+            src/markrag/cli.py
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.artifact_suffix }}
+          path: dist/${{ matrix.asset_name }}*
+          retention-days: 1
+
+  # ── 3. Build Python distribution (wheel + sdist) ─────────────────────────
+  build-python:
+    name: Build Python package
+    needs: changelog
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Update version to match tag
+        shell: bash
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          sed -i.bak "s/^version = \".*\"/version = \"${TAG_VERSION}\"/" pyproject.toml
+          rm -f pyproject.toml.bak
+          uv lock
+
+      - name: Build wheel and source distribution
+        shell: bash
+        run: |
+          uv build
+
+      - name: Validate Python artifacts
+        shell: bash
+        run: |
+          test -f dist/*.whl
+          test -f dist/*.tar.gz
+          uvx --from check-wheel-contents check-wheel-contents dist/*.whl
+          WHEEL=$(ls dist/*.whl)
+          uv run --isolated --no-project --with "${WHEEL}" python -c \
+            "import markrag; from importlib.metadata import version; assert version('markrag') == '${GITHUB_REF_NAME#v}'"
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: dist/
+          retention-days: 1
+
+  # ── 4. Create GitHub Release ──────────────────────────────────────────────
+  create-release:
+    name: Create GitHub Release
+    needs: [changelog, build-binaries, build-python]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed to create the release and upload assets
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets/
+          merge-multiple: true
+
+      - name: Create release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "${{ github.ref_name }}"
+          body: ${{ needs.changelog.outputs.release_body }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
+          files: release-assets/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── 5. Publish to PyPI ────────────────────────────────────────────────────
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [create-release]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # needed for PyPI OIDC publishing
+    environment:
+      name: pypi
+      url: https://pypi.org/project/markrag/
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Python distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: dist/
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Publish to PyPI (OIDC — no token needed)
+        run: uv publish --trusted-publishing always
