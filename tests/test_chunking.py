@@ -1,9 +1,18 @@
 """Tests for chunking logic."""
 
-import pytest
 
-from markrag.chunking import Chunk, chunk_concept, chunk_description
-from markrag.okf import Concept, Frontmatter, derive_trust_level
+from markrag.chunking import (
+    KIND_BODY,
+    KIND_DESCRIPTION,
+    KIND_HEADING,
+    KIND_TITLE,
+    MAX_CHUNK_CHARS,
+    chunk_all,
+    chunk_concept,
+    chunk_description,
+    chunk_title,
+)
+from markrag.okf import Concept
 
 
 class TestChunking:
@@ -164,6 +173,233 @@ Content 2.
         assert heading_chunks[0].heading == "description"
         assert heading_chunks[1].heading == "Heading 1"
         assert heading_chunks[2].heading == "Heading 2"
+
+
+class TestChunkSize:
+    """Test the maximum chunk size guarantee."""
+
+    def test_oversized_section_is_split(self, temp_wiki_dir):
+        """A section longer than the limit is broken into several chunks."""
+        paragraph = "word " * 300
+        content = f"""---
+type: Test
+title: Oversized
+description: Long section
+---
+
+## Long Section
+
+{paragraph}
+
+{paragraph}
+"""
+        file_path = temp_wiki_dir / "long.md"
+        file_path.write_text(content, encoding="utf-8")
+
+        concept = Concept.from_file(file_path)
+        chunks = chunk_concept(concept)
+
+        assert len(chunks) > 1
+        assert all(len(chunk.text) <= MAX_CHUNK_CHARS for chunk in chunks)
+
+    def test_single_unbroken_line_is_split(self, temp_wiki_dir):
+        """A line with no spaces is still cut to the limit."""
+        content = f"""---
+type: Test
+title: Unbroken
+description: One long line
+---
+
+## Long Line
+
+{"x" * (MAX_CHUNK_CHARS * 2)}
+"""
+        file_path = temp_wiki_dir / "unbroken.md"
+        file_path.write_text(content, encoding="utf-8")
+
+        concept = Concept.from_file(file_path)
+        chunks = chunk_concept(concept)
+
+        assert len(chunks) > 1
+        assert all(len(chunk.text) <= MAX_CHUNK_CHARS for chunk in chunks)
+
+    def test_normal_sections_stay_in_one_chunk(self, temp_wiki_dir):
+        """Ordinary content is not needlessly fragmented."""
+        content = """---
+type: Test
+title: Normal
+description: Ordinary
+---
+
+## Short
+
+A short section.
+"""
+        file_path = temp_wiki_dir / "normal.md"
+        file_path.write_text(content, encoding="utf-8")
+
+        concept = Concept.from_file(file_path)
+        assert len(chunk_concept(concept)) == 1
+
+    def test_custom_limit_is_respected(self, temp_wiki_dir):
+        """The limit is a parameter, not a constant baked into the logic."""
+        content = f"""---
+type: Test
+title: Custom
+description: Custom limit
+---
+
+## Section
+
+{"word " * 100}
+"""
+        file_path = temp_wiki_dir / "custom.md"
+        file_path.write_text(content, encoding="utf-8")
+
+        concept = Concept.from_file(file_path)
+        chunks = chunk_concept(concept, max_chars=200)
+
+        assert len(chunks) > 1
+        assert all(len(chunk.text) <= 200 for chunk in chunks)
+
+
+class TestPreamble:
+    """Test that content before the first heading is never lost."""
+
+    def test_preamble_becomes_its_own_chunk(self, temp_wiki_dir):
+        """Introductory prose is kept, not dropped."""
+        content = """---
+type: Test
+title: Preamble
+description: Has a preamble
+---
+
+# Overview
+
+Some introductory prose that matters.
+
+## Section
+
+Section content.
+"""
+        file_path = temp_wiki_dir / "preamble.md"
+        file_path.write_text(content, encoding="utf-8")
+
+        concept = Concept.from_file(file_path)
+        chunks = chunk_concept(concept)
+
+        assert len(chunks) == 2
+        assert chunks[0].heading is None
+        assert "introductory prose" in chunks[0].text
+        assert chunks[1].heading == "Section"
+
+    def test_heading_only_preamble_is_folded_into_the_first_section(self, temp_wiki_dir):
+        """A bare '#' heading adds no content of its own."""
+        content = """---
+type: Test
+title: Heading Only
+description: Just a heading
+---
+
+# Overview
+
+## Section
+
+Section content.
+"""
+        file_path = temp_wiki_dir / "headingonly.md"
+        file_path.write_text(content, encoding="utf-8")
+
+        concept = Concept.from_file(file_path)
+        chunks = chunk_concept(concept)
+
+        assert len(chunks) == 1
+        assert chunks[0].heading == "Section"
+        assert "# Overview" in chunks[0].text
+
+    def test_empty_body_produces_no_chunks(self, temp_wiki_dir):
+        """An empty body is not an error."""
+        content = """---
+type: Test
+title: Empty
+description: Nothing here
+---
+"""
+        file_path = temp_wiki_dir / "empty.md"
+        file_path.write_text(content, encoding="utf-8")
+
+        concept = Concept.from_file(file_path)
+        assert chunk_concept(concept) == []
+
+
+class TestChunkKinds:
+    """Test the complete chunk set for a concept."""
+
+    def test_chunk_all_covers_every_kind(self, temp_wiki_dir):
+        """Title, description, heading, and body chunks are all produced."""
+        content = """---
+type: Test
+title: Complete
+description: A complete concept
+---
+
+## Section
+
+Body content.
+"""
+        file_path = temp_wiki_dir / "complete.md"
+        file_path.write_text(content, encoding="utf-8")
+
+        concept = Concept.from_file(file_path)
+        chunks = chunk_all(concept)
+
+        kinds = [chunk.kind for chunk in chunks]
+        assert KIND_TITLE in kinds
+        assert KIND_DESCRIPTION in kinds
+        assert KIND_HEADING in kinds
+        assert KIND_BODY in kinds
+
+    def test_chunk_indexes_are_sequential(self, temp_wiki_dir):
+        """Chunk indexes are dense and ordered."""
+        content = """---
+type: Test
+title: Sequential
+description: Sequential indexes
+---
+
+## One
+
+First.
+
+## Two
+
+Second.
+"""
+        file_path = temp_wiki_dir / "sequential.md"
+        file_path.write_text(content, encoding="utf-8")
+
+        concept = Concept.from_file(file_path)
+        chunks = chunk_all(concept)
+
+        assert [chunk.chunk_index for chunk in chunks] == list(range(len(chunks)))
+
+    def test_title_chunk_is_absent_without_a_title(self, temp_wiki_dir):
+        """A concept without a title still chunks the rest."""
+        content = """---
+type: Test
+description: No title
+---
+
+## Section
+
+Body.
+"""
+        file_path = temp_wiki_dir / "notitle.md"
+        file_path.write_text(content, encoding="utf-8")
+
+        concept = Concept.from_file(file_path)
+        assert chunk_title(concept) == []
+        assert chunk_all(concept)
 
 
 class TestChunkMetadataStamping:
