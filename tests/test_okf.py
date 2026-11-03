@@ -1,6 +1,5 @@
 """Tests for OKF format handling."""
 
-
 from markrag.okf import (
     RESERVED_FILES,
     Bundle,

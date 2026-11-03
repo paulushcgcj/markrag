@@ -1,6 +1,5 @@
 """Tests for chunking logic."""
 
-
 from markrag.chunking import (
     KIND_BODY,
     KIND_DESCRIPTION,
