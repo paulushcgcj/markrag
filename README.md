@@ -34,7 +34,7 @@ markrag init
 markrag serve
 ```
 
-The `init` command creates a sibling `myrepo.wiki` directory with `index.md`, `home.md`, `log.md` and seed documents from your README and repo structure. The wiki is a plain git repo you can publish to GitHub Wiki or keep in a reviewable PR.
+The `init` command creates a sibling `myrepo.wiki` directory with `index.md`, `log.md` and seed documents from your README and repo structure. The wiki is a plain git repo you can publish to GitHub Wiki or keep in a reviewable PR.
 
 Environment variables:
 
@@ -55,7 +55,6 @@ Environment variables:
 ```bash
 markrag --help
 markrag init --repo /path/to/repo
-markrag init --repo /path/to/repo --adopt
 markrag serve --repo /path/to/repo
 markrag search "database connection" --type Technology --format json
 markrag read technologies/database --section Configuration
@@ -74,14 +73,40 @@ MCP configuration is passed via `MARKRAG_REPO` in your client settings. See the 
   ...
 
 ~/Repos/<org>/<repo>.wiki/
-  index.md    # bundle navigation, regenerated
-  home.md     # GitHub Wiki homepage, regenerated
-  log.md      # append-only change history
+  index.md           # bundle navigation, regenerated
+  home.md            # GitHub Wiki homepage, yours to write
+  log.md             # append-only change history
   technologies/
+    index.md         # section navigation, regenerated
+    log.md           # section change history
   processes/
+    index.md
+    log.md
 ```
 
-`index.md` and `home.md` are server-managed. Edit documents; markrag regenerates navigation.
+## Who owns which file
+
+markrag draws a hard line between machine-curated navigation and human content:
+
+| File | Owner | Rule |
+|------|-------|------|
+| `index.md` (root and every directory) | markrag | Regenerated from the concept frontmatter on every write |
+| `log.md` (root and every directory) | markrag | Appended to on every write, never rewritten |
+| `home.md`, `_Sidebar.md`, `_Footer.md`, `_Header.md` | you | Never written by markrag, in any directory |
+| any other `*.md` | you | Written only through `okf_write`, never touched by a rebuild |
+
+The reserved names are reserved at every level of the hierarchy and the
+comparison is case-insensitive, so `Index` cannot be used to overwrite
+`index.md` on a case-insensitive filesystem.
+
+So a write never leaves the navigation behind: the concept changes, the indexes
+are regenerated, and the change is recorded in the log of the wiki root and of
+every directory the concept sits in.
+
+`init` follows the same rule. A wiki that already holds documents is never
+seeded - markrag does not add concepts to a wiki someone else wrote - but its
+`index.md` and `log.md` files are still refreshed, because those are
+machine-curated wherever they live. `home.md` is left exactly as it is.
 
 ## Trust model
 
@@ -101,7 +126,8 @@ All generated content is stamped `generated.by`, `generated.at`, and `status: dr
 
 - The search index lives outside the wiki and can be deleted; it rebuilds on next search.
 - Embedding models are downloaded on first use.
-- `init --adopt` lets markrag manage an existing wiki without rewriting curated navigation.
+- Regenerating the indexes replaces the navigation of every directory. Keep
+  hand-written navigation in `home.md` or in a concept of its own.
 
 ## Contributing
 
