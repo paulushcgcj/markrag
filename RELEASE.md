@@ -105,7 +105,8 @@ Edit `pyproject.toml` and set the new version string, then commit:
 
 ```bash
 # Example: bumping to 1.2.0
-sed -i 's/^version = .*/version = "1.2.0"/' pyproject.toml
+# (-i.bak works on both GNU sed and macOS BSD sed)
+sed -i.bak 's/^version = .*/version = "1.2.0"/' pyproject.toml && rm -f pyproject.toml.bak
 git add pyproject.toml
 git commit -m "chore: bump version to 1.2.0"
 git push
