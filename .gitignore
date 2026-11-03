@@ -26,6 +26,15 @@ htmlcov/
 build/
 dist/
 
+# PyInstaller
+*.spec
+
+# git-cliff
+CHANGES.md
+
+# release.yml "Update version to match tag" step (BSD sed leaves a .bak)
+pyproject.toml.bak
+
 # Local markrag cache
 .markrag/
 
