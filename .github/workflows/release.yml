@@ -81,6 +81,7 @@ jobs:
             --onefile \
             --name "${{ matrix.asset_name }}" \
             --hidden-import fastembed \
+            --copy-metadata markrag \
             src/markrag/cli.py
 
       - name: Build binary (macOS)
@@ -90,6 +91,7 @@ jobs:
             --onefile \
             --name "${{ matrix.asset_name }}" \
             --hidden-import fastembed \
+            --copy-metadata markrag \
             src/markrag/cli.py
 
       - name: Build binary (Windows)
@@ -100,6 +102,7 @@ jobs:
             --onefile `
             --name "${{ matrix.asset_name }}" `
             --hidden-import fastembed `
+            --copy-metadata markrag `
             src/markrag/cli.py
 
       - name: Upload binary artifact
