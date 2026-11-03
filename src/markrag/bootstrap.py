@@ -787,6 +787,7 @@ def _ensure_git_repo(wiki: Path, wiki_remote: str | None) -> bool:
     if (wiki / ".git").exists():
         return False
 
+    cloned = False
     if wiki_remote:
         empty = not any(wiki.iterdir())
         if empty:
@@ -796,14 +797,18 @@ def _ensure_git_repo(wiki: Path, wiki_remote: str | None) -> bool:
                 capture_output=True,
                 text=True,
             )
-            return True
-        _run_git(["init"], wiki)
+            cloned = True
+        else:
+            _run_git(["init"], wiki)
     else:
         _run_git(["init"], wiki)
 
+    # A fresh repo has no identity of its own and cannot commit until it has
+    # one. A clone inherits nothing either when the machine has no global git
+    # identity, which is the normal case on a CI runner.
     _run_git(["config", "user.name", "markrag"], wiki)
     _run_git(["config", "user.email", "markrag@localhost"], wiki)
-    return False
+    return cloned
 
 
 def _append_log(wiki: Path, entry: str, *, date: str | None = None) -> None:

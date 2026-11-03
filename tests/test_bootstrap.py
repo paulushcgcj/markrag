@@ -10,6 +10,19 @@ from markrag.bootstrap import bootstrap_wiki, build_seed_docs
 from markrag.okf import Bundle, wiki_path_for_repo
 
 
+@pytest.fixture(autouse=True)
+def no_global_git_config(tmp_path, monkeypatch):
+    """Hide the developer's global git config from every git call.
+
+    The bootstrap sets its own commit identity; the suite must not depend on
+    the machine having one.
+    """
+    empty = tmp_path / "empty-gitconfig"
+    empty.write_text("", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(empty))
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(empty))
+
+
 @pytest.fixture
 def source_repo(tmp_path):
     """Build a repository with the layout markrag is expected to handle."""
