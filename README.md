@@ -8,7 +8,7 @@
 
 **markrag** serves a curated knowledge wiki as an MCP server so AI coding agents can retrieve trustworthy, per-repository information. The wiki follows the [Open Knowledge Format (OKF) v0.2](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) specification.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 
 ## What it is
 
@@ -139,7 +139,7 @@ All generated content is stamped `generated.by`, `generated.at`, and `status: dr
 
 ## License
 
-MIT
+Distributed under [GPL-3.0](LICENSE).
 
 ## References
 

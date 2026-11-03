@@ -8,14 +8,14 @@ version = "0.1.0"
 description = "OKF-backed RAG MCP server for per-repo wikis"
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "MIT" }
+license = "GPL-3.0-only"
 authors = [
     { name = "Paul Cruz", email = "paulushcgcj@gmail.com" }
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
