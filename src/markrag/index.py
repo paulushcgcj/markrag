@@ -1,517 +1,579 @@
 """SQLite FTS5 + vector index for OKF concepts.
 
-Provides hybrid search with:
-- FTS5 full-text search
-- Vector similarity search via fastembed
-- Reciprocal Rank Fusion (RRF)
-- Metadata pre-filtering
+The index is a *derived artifact*: the Markdown files are the single source of
+truth and the database can always be thrown away and rebuilt. It stores
+
+- an FTS5 table over every chunk's text, and
+- the embedding vector for every chunk, alongside the chunk text.
+
+Retrieval fuses the two ranked lists with Reciprocal Rank Fusion. Metadata
+filters (type, tags, status) are applied *before* scoring, so the candidate set
+is narrowed first.
 """
 
 import hashlib
 import os
 import pickle
+import re
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import numpy as np
 
-from markrag.chunking import Chunk, chunk_concept, chunk_description
-from markrag.okf import Bundle, Concept, derive_trust_level, is_stale
+from markrag.chunking import Chunk, chunk_all
+from markrag.embeddings import EmbeddingProvider
+from markrag.okf import Bundle, is_reserved_filename
+
+# Reciprocal Rank Fusion constant. 60 is the value used by the original
+# "Reciprocal Rank Fusion outperforms Condorcet and individual PRF" paper.
+RRF_K = 60
+
+# Number of candidates pulled from each ranked list before fusion.
+CANDIDATE_POOL = 50
+
+_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
+
+
+@dataclass(frozen=True)
+class SearchHit:
+    """A single scored concept returned by :meth:`KnowledgeIndex.search`."""
+
+    concept_id: str
+    chunk_index: int
+    kind: str
+    heading: str | None
+    text: str
+    excerpt_text: str
+    anchor: str | None
+    score: float
+    fts_rank: int | None
+    vector_rank: int | None
+
+
+@dataclass(frozen=True)
+class SearchResponse:
+    """The outcome of a hybrid search."""
+
+    hits: tuple[SearchHit, ...]
+    fts_available: bool
+    vector_available: bool
+    candidate_count: int
+
+
+def _fts_query(query: str) -> str | None:
+    """Build a safe FTS5 MATCH expression from a free-text query.
+
+    Every token is quoted so that FTS5 operators typed by a user cannot cause a
+    syntax error, and the full phrase is added as an extra term so that exact
+    wording outranks scattered token matches.
+
+    Args:
+        query: Raw user query.
+
+    Returns:
+        The MATCH expression, or ``None`` when the query has no usable tokens.
+    """
+    tokens = [token.lower() for token in _TOKEN_RE.findall(query)]
+    if not tokens:
+        return None
+
+    terms = [f'"{token}"' for token in dict.fromkeys(tokens)]
+    if len(tokens) > 1:
+        terms.insert(0, '"' + " ".join(tokens) + '"')
+    return " OR ".join(terms)
+
+
+def _normalise(vector: np.ndarray) -> np.ndarray:
+    """Return a unit-length vector, or a zero vector when the norm is zero."""
+    norm = float(np.linalg.norm(vector))
+    if norm == 0.0:
+        return np.zeros_like(vector)
+    return vector / norm
+
+
+def bundle_fingerprint(bundle: Bundle) -> str:
+    """Compute a fingerprint of the bundle's Markdown files.
+
+    The fingerprint changes whenever a document is added, removed, or edited,
+    which is what tells the index that it must be rebuilt.
+
+    Reserved files are excluded: they hold navigation and history rather than
+    content, and markrag regenerates them on every write.
+
+    Args:
+        bundle: The bundle to fingerprint.
+
+    Returns:
+        A hex digest of the bundle contents.
+    """
+    digest = hashlib.sha256()
+    for path in sorted(bundle.root_path.rglob("*.md")):
+        if is_reserved_filename(path.name):
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        digest.update(str(path.relative_to(bundle.root_path)).encode("utf-8"))
+        digest.update(str(stat.st_mtime_ns).encode("utf-8"))
+        digest.update(str(stat.st_size).encode("utf-8"))
+    return digest.hexdigest()
 
 
 class KnowledgeIndex:
-    """SQLite-based index for OKF bundle with FTS5 and vector storage."""
+    """SQLite-backed hybrid index for a single OKF bundle."""
 
-    def __init__(self, db_path: Path, bundle_name: str):
+    def __init__(
+        self,
+        db_path: Path | str,
+        bundle_name: str,
+        provider: EmbeddingProvider | None = None,
+        embedding_signature: str = "",
+    ) -> None:
         """Initialize the index.
 
         Args:
-            db_path: Path to the SQLite database file
-            bundle_name: Name of the bundle (used for table naming)
+            db_path: Path to the SQLite database file.
+            bundle_name: Name of the bundle, used to prefix table names.
+            provider: Embedding provider. When omitted, vectors are not built
+                and retrieval falls back to keyword search.
+            embedding_signature: Identifies the embedding configuration. The
+                index is rebuilt when it changes, so switching embeddings on
+                or choosing a different model takes effect.
         """
-        self.db_path = db_path
-        self.bundle_name = bundle_name
+        self.db_path = Path(db_path)
+        safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", bundle_name)
+        self._prefix = f"{safe_name}_" if safe_name else ""
+        self._provider = provider
+        self.embedding_signature = embedding_signature
         self._conn: sqlite3.Connection | None = None
 
-    def _ensure_conn(self) -> sqlite3.Connection:
-        """Get or create database connection."""
+    # -- schema -----------------------------------------------------------
+
+    @property
+    def chunks_table(self) -> str:
+        """Name of the table holding chunk text, metadata, and vectors."""
+        return f"{self._prefix}chunks"
+
+    @property
+    def fts_table(self) -> str:
+        """Name of the FTS5 table holding indexed chunk text."""
+        return f"{self._prefix}fts"
+
+    @property
+    def meta_table(self) -> str:
+        """Name of the table holding index metadata."""
+        return f"{self._prefix}meta"
+
+    def _connect(self) -> sqlite3.Connection:
+        """Open the database connection, creating it if needed."""
         if self._conn is None:
-            self._conn = sqlite3.connect(str(self.db_path))
-            self._conn.row_factory = sqlite3.Row
-            # Enable WAL mode for better concurrent access
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(str(self.db_path))
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn = conn
         return self._conn
 
-    def _table_name(self, suffix: str) -> str:
-        """Generate table name with bundle prefix."""
-        safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", self.bundle_name)
-        return f"{safe_name}_{suffix}"
-
     def initialize(self) -> None:
-        """Initialize database schema."""
-        conn = self._ensure_conn()
-        cursor = conn.cursor()
-
-        # Create FTS5 table for full-text search
-        fts_table = self._table_name("fts")
-        cursor.execute(f"""
-            CREATE VIRTUAL TABLE IF NOT EXISTS {fts_table} USING fts5(
-                concept_id,
-                chunk_index,
-                text,
-                heading,
-                type,
-                status,
-                trust_level,
-                tokenize="unicode61 remove_diacritics 2"
-            )
-        """)
-
-        # Create metadata table for concepts
-        meta_table = self._table_name("metadata")
-        cursor.execute(f"""
-            CREATE TABLE IF NOT EXISTS {meta_table} (
-                concept_id TEXT PRIMARY KEY,
-                type TEXT,
-                title TEXT,
-                description TEXT,
-                status TEXT,
-                trust_level TEXT,
-                stale BOOLEAN,
-                stale_days INTEGER,
-                tags TEXT,
-                frontmatter_blob BLOB
-            )
-        """)
-
-        # Create vector table
-        vec_table = self._table_name("vectors")
-        cursor.execute(f"""
-            CREATE TABLE IF NOT EXISTS {vec_table} (
-                concept_id TEXT,
-                chunk_index INTEGER,
+        """Create the schema if it does not exist yet."""
+        conn = self._connect()
+        conn.executescript(
+            f"""
+            CREATE TABLE IF NOT EXISTS {self.chunks_table} (
+                concept_id TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                heading TEXT,
+                text TEXT NOT NULL,
+                type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                trust_level TEXT NOT NULL,
+                tags TEXT NOT NULL,
                 embedding BLOB,
                 PRIMARY KEY (concept_id, chunk_index)
-            )
-        """)
+            );
 
-        # Create index on FTS table for filtering
-        cursor.execute(f"""
-            CREATE INDEX IF NOT EXISTS idx_{fts_table}_concept 
-            ON {fts_table}(concept_id)
-        """)
-        cursor.execute(f"""
-            CREATE INDEX IF NOT EXISTS idx_{fts_table}_type 
-            ON {fts_table}(type)
-        """)
-        cursor.execute(f"""
-            CREATE INDEX IF NOT EXISTS idx_{fts_table}_status 
-            ON {fts_table}(status)
-        """)
+            CREATE VIRTUAL TABLE IF NOT EXISTS {self.fts_table} USING fts5(
+                concept_id UNINDEXED,
+                chunk_index UNINDEXED,
+                heading,
+                text,
+                tokenize="unicode61 remove_diacritics 2"
+            );
 
+            CREATE TABLE IF NOT EXISTS {self.meta_table} (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+            """
+        )
         conn.commit()
+
+    # -- building ---------------------------------------------------------
 
     def clear(self) -> None:
-        """Clear all data from the index."""
-        conn = self._ensure_conn()
-        cursor = conn.cursor()
+        """Remove every indexed row.
 
-        for suffix in ["fts", "metadata", "vectors"]:
-            table = self._table_name(suffix)
-            cursor.execute(f"DELETE FROM {table}")
-
+        The recorded fingerprint is dropped too: an index with no rows must
+        never look current, or the next search would find nothing and stop
+        rebuilding.
+        """
+        conn = self._connect()
+        self.initialize()
+        conn.execute(f"DELETE FROM {self.chunks_table}")
+        conn.execute(f"DELETE FROM {self.fts_table}")
+        conn.execute(f"DELETE FROM {self.meta_table}")
         conn.commit()
 
-    def index_bundle(self, bundle: Bundle) -> None:
-        """Index all concepts in a bundle.
+    def _embed(self, texts: list[str]) -> list[bytes | None]:
+        """Embed chunk texts, returning ``None`` for each on failure."""
+        if self._provider is None or not texts:
+            return [None] * len(texts)
+
+        try:
+            vectors = self._provider.embed_batch(texts)
+        except Exception:
+            # Embeddings are an enhancement: a missing model or an unreachable
+            # endpoint must not stop keyword retrieval from working.
+            return [None] * len(texts)
+
+        encoded: list[bytes | None] = []
+        for vector in vectors:
+            encoded.append(
+                pickle.dumps(np.asarray(vector, dtype=np.float32), protocol=pickle.HIGHEST_PROTOCOL)
+            )
+        # A provider that returns fewer vectors than texts leaves the tail
+        # without an embedding; those rows stay keyword-only.
+        while len(encoded) < len(texts):
+            encoded.append(None)
+        return encoded
+
+    def build(self, bundle: Bundle) -> bool:
+        """Rebuild the index from a bundle.
 
         Args:
-            bundle: The bundle to index
+            bundle: The bundle to index.
+
+        Returns:
+            ``True`` when vectors were produced, ``False`` when the embedding
+            provider was unavailable and only keyword retrieval is possible.
         """
+        self.initialize()
         self.clear()
 
-        conn = self._ensure_conn()
-        cursor = conn.cursor()
+        conn = self._connect()
+        chunks: list[Chunk] = []
+        for concept_id in sorted(bundle.concepts):
+            concept = bundle.concepts[concept_id]
+            chunks.extend(chunk_all(concept))
 
-        fts_table = self._table_name("fts")
-        meta_table = self._table_name("metadata")
-        vec_table = self._table_name("vectors")
+        embeddings = self._embed([chunk.text for chunk in chunks])
+        vectors_available = any(embedding is not None for embedding in embeddings)
 
-        # Index each concept
-        for concept_id, concept in bundle.concepts.items():
-            # Skip reserved files (shouldn't be in concepts dict, but just in case)
-            if concept.is_reserved:
-                continue
-
-            trust_level = derive_trust_level(concept)
-            stale = is_stale(concept)
-            stale_days = None
-            if stale:
-                from markrag.okf import get_stale_days
-                stale_days = get_stale_days(concept)
-
-            # Store metadata
-            frontmatter_blob = pickle.dumps(concept.frontmatter.to_dict())
-            tags_str = ",".join(concept.frontmatter.tags)
-
-            cursor.execute(f"""
-                INSERT INTO {meta_table} (
-                    concept_id, type, title, description, status,
-                    trust_level, stale, stale_days, tags, frontmatter_blob
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                concept_id,
-                concept.frontmatter.type,
-                concept.frontmatter.title,
-                concept.frontmatter.description,
-                concept.frontmatter.status,
-                trust_level,
-                stale,
-                stale_days,
-                tags_str,
-                frontmatter_blob,
-            ))
-
-            # Get all chunks for this concept
-            body_chunks = chunk_concept(concept)
-            desc_chunks = chunk_description(concept)
-            all_chunks = desc_chunks + body_chunks
-
-            for chunk in all_chunks:
-                # Insert into FTS
-                cursor.execute(f"""
-                    INSERT INTO {fts_table} (
-                        concept_id, chunk_index, text, heading, type, status, trust_level
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    concept_id,
+        chunk_rows = []
+        fts_rows = []
+        for chunk, embedding in zip(chunks, embeddings, strict=True):
+            tags = "|".join([f"|{tag}|" for tag in chunk.frontmatter.get("tags", [])])
+            chunk_rows.append(
+                (
+                    chunk.concept_id,
                     chunk.chunk_index,
-                    chunk.text,
+                    chunk.kind,
                     chunk.heading,
-                    concept.frontmatter.type,
+                    chunk.text,
+                    chunk.frontmatter.get("type", ""),
                     chunk.status,
                     chunk.trust_level,
-                ))
+                    tags,
+                    embedding,
+                )
+            )
+            fts_rows.append((chunk.concept_id, chunk.chunk_index, chunk.heading or "", chunk.text))
 
-                # Store vector placeholder (will be updated with actual embeddings)
-                cursor.execute(f"""
-                    INSERT INTO {vec_table} (
-                        concept_id, chunk_index, embedding
-                    ) VALUES (?, ?, ?)
-                """, (
-                    concept_id,
-                    chunk.chunk_index,
-                    None,  # Placeholder
-                ))
-
-        conn.commit()
-
-    def update_vectors(
-        self, concept_id: str, embeddings: dict[int, np.ndarray]
-    ) -> None:
-        """Update vector embeddings for a concept's chunks.
-
-        Args:
-            concept_id: The concept ID
-            embeddings: Dict mapping chunk_index to embedding array
-        """
-        conn = self._ensure_conn()
-        cursor = conn.cursor()
-        vec_table = self._table_name("vectors")
-
-        for chunk_index, embedding in embeddings.items():
-            # Convert numpy array to bytes
-            embedding_bytes = pickle.dumps(embedding)
-            cursor.execute(f"""
-                UPDATE {vec_table} 
-                SET embedding = ? 
-                WHERE concept_id = ? AND chunk_index = ?
-            """, (embedding_bytes, concept_id, chunk_index))
-
-        conn.commit()
-
-    def fts_search(
-        self,
-        query: str,
-        type_filter: str | None = None,
-        status_filter: str | None = None,
-        top_k: int = 50,
-    ) -> list[dict[str, Any]]:
-        """Perform FTS5 search.
-
-        Args:
-            query: Search query
-            type_filter: Filter by concept type
-            status_filter: Filter by status
-            top_k: Number of results to return
-
-        Returns:
-            List of results with concept_id, score, and metadata
-        """
-        conn = self._ensure_conn()
-        cursor = conn.cursor()
-        fts_table = self._table_name("fts")
-
-        # Build query
-        where_clauses = []
-        params: list[Any] = []
-
-        if type_filter:
-            where_clauses.append("type = ?")
-            params.append(type_filter)
-
-        if status_filter and status_filter != "any":
-            where_clauses.append("status = ?")
-            params.append(status_filter)
-
-        where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
-
-        # Use FTS5 match with NEAR for phrase matching
-        # The query syntax supports AND, OR, NOT, NEAR, quotes for phrases
-        fts_query = f"{fts_table} q='{query}'"
-
-        sql = f"""
-            SELECT 
-                concept_id,
-                chunk_index,
-                text,
-                heading,
-                type,
-                status,
-                trust_level,
-                bm25({fts_table}, 1.0, 1.0) as score
-            FROM {fts_table}
-            WHERE {where_sql}
-            ORDER BY score DESC
-            LIMIT ?
-        """
-        params.extend([top_k])
-
-        cursor.execute(sql, params)
-
-        results = []
-        for row in cursor.fetchall():
-            results.append({
-                "concept_id": row["concept_id"],
-                "chunk_index": row["chunk_index"],
-                "text": row["text"],
-                "heading": row["heading"],
-                "type": row["type"],
-                "status": row["status"],
-                "trust_level": row["trust_level"],
-                "score": row["score"],
-                "source": "fts",
-            })
-
-        return results
-
-    def vector_search(
-        self,
-        query_embedding: np.ndarray,
-        type_filter: str | None = None,
-        status_filter: str | None = None,
-        top_k: int = 50,
-    ) -> list[dict[str, Any]]:
-        """Perform vector similarity search.
-
-        Args:
-            query_embedding: Query embedding vector
-            type_filter: Filter by concept type
-            status_filter: Filter by status
-            top_k: Number of results to return
-
-        Returns:
-            List of results with concept_id, score (cosine similarity), and metadata
-        """
-        conn = self._ensure_conn()
-        cursor = conn.cursor()
-        vec_table = self._table_name("vectors")
-        fts_table = self._table_name("fts")
-
-        # First, get all vectors that match the filters
-        where_clauses = []
-        params: list[Any] = []
-
-        if type_filter:
-            where_clauses.append(f"v.concept_id IN (SELECT concept_id FROM {fts_table} WHERE type = ?)")
-            params.append(type_filter)
-
-        if status_filter and status_filter != "any":
-            where_clauses.append(f"v.concept_id IN (SELECT concept_id FROM {fts_table} WHERE status = ?)")
-            params.append(status_filter)
-
-        where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
-
-        # Get all embeddings and their metadata
-        sql = f"""
-            SELECT 
-                v.concept_id,
-                v.chunk_index,
-                v.embedding,
-                f.heading,
-                f.type,
-                f.status,
-                f.trust_level
-            FROM {vec_table} v
-            JOIN {fts_table} f ON v.concept_id = f.concept_id AND v.chunk_index = f.chunk_index
-            WHERE v.embedding IS NOT NULL AND {where_sql}
-        """
-
-        cursor.execute(sql, params)
-
-        # Calculate cosine similarity for each
-        results = []
-        query_norm = np.linalg.norm(query_embedding)
-
-        for row in cursor.fetchall():
-            embedding_bytes = row["embedding"]
-            try:
-                embedding = pickle.loads(embedding_bytes)
-                doc_norm = np.linalg.norm(embedding)
-                if doc_norm == 0 or query_norm == 0:
-                    similarity = 0.0
-                else:
-                    similarity = float(np.dot(query_embedding, embedding) / (query_norm * doc_norm))
-
-                results.append({
-                    "concept_id": row["concept_id"],
-                    "chunk_index": row["chunk_index"],
-                    "heading": row["heading"],
-                    "type": row["type"],
-                    "status": row["status"],
-                    "trust_level": row["trust_level"],
-                    "score": similarity,
-                    "source": "vector",
-                })
-            except Exception:
-                continue
-
-        # Sort by similarity (descending)
-        results.sort(key=lambda x: x["score"], reverse=True)
-
-        return results[:top_k]
-
-    def hybrid_search(
-        self,
-        query: str,
-        query_embedding: np.ndarray | None = None,
-        type_filter: str | None = None,
-        status_filter: str | None = None,
-        top_k: int = 8,
-        k1: int = 60,
-    ) -> list[dict[str, Any]]:
-        """Perform hybrid search with Reciprocal Rank Fusion (RRF).
-
-        Args:
-            query: Text query for FTS
-            query_embedding: Vector for vector search (optional)
-            type_filter: Filter by concept type
-            status_filter: Filter by status
-            top_k: Number of final results
-            k1: RRF constant (default 60)
-
-        Returns:
-            Fused results from FTS and vector search
-        """
-        # Get FTS results
-        fts_results = self.fts_search(
-            query, type_filter, status_filter, top_k=top_k * 2
-        )
-
-        # Get vector results if embedding provided
-        vector_results: list[dict[str, Any]] = []
-        if query_embedding is not None:
-            vector_results = self.vector_search(
-                query_embedding, type_filter, status_filter, top_k=top_k * 2
+        if chunk_rows:
+            conn.executemany(
+                f"""
+                INSERT OR REPLACE INTO {self.chunks_table}
+                    (concept_id, chunk_index, kind, heading, text, type, status,
+                     trust_level, tags, embedding)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                chunk_rows,
+            )
+            conn.executemany(
+                f"""
+                INSERT INTO {self.fts_table} (concept_id, chunk_index, heading, text)
+                VALUES (?, ?, ?, ?)
+                """,
+                fts_rows,
             )
 
-        # Fuse results using RRF
-        all_results = fts_results + vector_results
+        conn.execute(
+            f"INSERT OR REPLACE INTO {self.meta_table} (key, value) VALUES (?, ?)",
+            ("fingerprint", self._index_fingerprint(bundle)),
+        )
+        conn.execute(
+            f"INSERT OR REPLACE INTO {self.meta_table} (key, value) VALUES (?, ?)",
+            ("vectors_available", "1" if vectors_available else "0"),
+        )
+        conn.commit()
+        return vectors_available
 
-        # Create scoring dict: concept_id -> {source -> rank}
-        concept_rankings: dict[str, dict[str, int]] = {}
+    # -- searching --------------------------------------------------------
 
-        for rank, result in enumerate(all_results, 1):
-            concept_id = result["concept_id"]
-            source = result["source"]
+    def _filter_clause(
+        self,
+        type_: str | None,
+        tags: list[str] | None,
+        status: str | None,
+    ) -> tuple[str, list[Any]]:
+        """Build the metadata pre-filter clause and its parameters."""
+        clauses: list[str] = []
+        params: list[Any] = []
 
-            if concept_id not in concept_rankings:
-                concept_rankings[concept_id] = {}
+        if type_:
+            clauses.append("c.type = ?")
+            params.append(type_)
 
-            # Only keep the best rank per source
-            if source not in concept_rankings[concept_id] or rank < concept_rankings[concept_id][source]:
-                concept_rankings[concept_id][source] = rank
+        if status and status != "any":
+            clauses.append("c.status = ?")
+            params.append(status)
 
-        # Calculate RRF score for each concept
-        scored_results = []
-        for concept_id, source_ranks in concept_rankings.items():
-            score = 0.0
-            for source_rank in source_ranks.values():
-                score += 1.0 / (k1 + source_rank)
+        for tag in tags or []:
+            clauses.append("c.tags LIKE ?")
+            params.append(f"%|{tag}|%")
 
-            # Get metadata from one of the results (they should be similar)
-            sample_result = next(r for r in all_results if r["concept_id"] == concept_id)
+        return (" AND ".join(clauses) if clauses else "1=1"), params
 
-            scored_results.append({
-                **sample_result,
-                "rrf_score": score,
-            })
+    def _fts_candidates(
+        self,
+        query: str,
+        type_: str | None,
+        tags: list[str] | None,
+        status: str | None,
+        limit: int,
+    ) -> list[sqlite3.Row]:
+        """Run the FTS5 half of the search."""
+        match = _fts_query(query)
+        if match is None:
+            return []
 
-        # Sort by RRF score
-        scored_results.sort(key=lambda x: x["rrf_score"], reverse=True)
+        conn = self._connect()
+        self.initialize()
+        where_sql, params = self._filter_clause(type_, tags, status)
+        # FTS5 only accepts the MATCH operator against the table name itself,
+        # so the table must not be aliased here.
+        sql = f"""
+            SELECT {self.fts_table}.concept_id, {self.fts_table}.chunk_index,
+                   {self.fts_table}.heading, {self.fts_table}.text,
+                   c.kind, c.type, c.status, c.trust_level,
+                   bm25({self.fts_table}) AS rank
+            FROM {self.fts_table}
+            JOIN {self.chunks_table} c
+              ON c.concept_id = {self.fts_table}.concept_id
+             AND c.chunk_index = {self.fts_table}.chunk_index
+            WHERE {self.fts_table} MATCH ? AND {where_sql}
+            ORDER BY rank
+            LIMIT ?
+        """
+        rows = conn.execute(sql, [match, *params, limit]).fetchall()
+        return list(rows)
 
-        return scored_results[:top_k]
+    def _vector_candidates(
+        self,
+        query: str,
+        type_: str | None,
+        tags: list[str] | None,
+        status: str | None,
+        limit: int,
+    ) -> list[sqlite3.Row]:
+        """Run the vector half of the search using cosine similarity."""
+        if self._provider is None:
+            return []
 
-    def get_metadata(self, concept_id: str) -> dict[str, Any] | None:
-        """Get metadata for a concept."""
-        conn = self._ensure_conn()
-        cursor = conn.cursor()
-        meta_table = self._table_name("metadata")
+        conn = self._connect()
+        self.initialize()
+        where_sql, params = self._filter_clause(type_, tags, status)
+        sql = f"""
+            SELECT c.concept_id, c.chunk_index, c.kind, c.heading, c.text,
+                   c.type, c.status, c.trust_level, c.embedding
+            FROM {self.chunks_table} c
+            WHERE {where_sql} AND c.embedding IS NOT NULL
+        """
+        rows = list(conn.execute(sql, params).fetchall())
+        if not rows:
+            return []
 
-        cursor.execute(f"SELECT * FROM {meta_table} WHERE concept_id = ?", (concept_id,))
-        row = cursor.fetchone()
+        try:
+            query_vector = _normalise(np.asarray(self._provider.embed(query), dtype=np.float32))
+        except Exception:
+            return []
+        if query_vector.size == 0 or not float(np.linalg.norm(query_vector)):
+            return []
 
-        if row is None:
-            return None
+        scored: list[tuple[float, sqlite3.Row]] = []
+        for row in rows:
+            vector = pickle.loads(row["embedding"])  # noqa: S301 - own database
+            normed = _normalise(np.asarray(vector, dtype=np.float32))
+            if normed.shape != query_vector.shape:
+                continue
+            scored.append((float(np.dot(normed, query_vector)), row))
 
-        return {
-            "concept_id": row["concept_id"],
-            "type": row["type"],
-            "title": row["title"],
-            "description": row["description"],
-            "status": row["status"],
-            "trust_level": row["trust_level"],
-            "stale": bool(row["stale"]),
-            "stale_days": row["stale_days"],
-            "tags": row["tags"].split(",") if row["tags"] else [],
-            "frontmatter": pickle.loads(row["frontmatter_blob"]) if row["frontmatter_blob"] else {},
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [row for _, row in scored[:limit]]
+
+    def search(
+        self,
+        query: str,
+        type_: str | None = None,
+        tags: list[str] | None = None,
+        status: str | None = None,
+        top_k: int = 8,
+    ) -> SearchResponse:
+        """Run a hybrid search.
+
+        Args:
+            query: Free-text query.
+            type_: Restrict to a concept type.
+            tags: Restrict to concepts carrying every listed tag.
+            status: Restrict to a lifecycle status. ``"any"`` disables the filter.
+            top_k: Maximum number of concepts to return.
+
+        Returns:
+            The ranked hits plus which halves of the search were available.
+        """
+        fts_rows = self._fts_candidates(query, type_, tags, status, CANDIDATE_POOL)
+        vector_rows = self._vector_candidates(query, type_, tags, status, CANDIDATE_POOL)
+
+        fts_ranked = self._best_per_concept(fts_rows)
+        vector_ranked = self._best_per_concept(vector_rows)
+
+        fts_ranks = {row["concept_id"]: position for position, row in enumerate(fts_ranked, 1)}
+        vector_ranks = {
+            row["concept_id"]: position for position, row in enumerate(vector_ranked, 1)
         }
 
-    def get_all_metadata(self) -> list[dict[str, Any]]:
-        """Get metadata for all concepts."""
-        conn = self._ensure_conn()
-        cursor = conn.cursor()
-        meta_table = self._table_name("metadata")
+        # The excerpt should come from a body chunk when one matched; title and
+        # description chunks make poor excerpts.
+        body_rows = self._best_body_per_concept([*fts_rows, *vector_rows])
 
-        cursor.execute(f"SELECT * FROM {meta_table}")
+        fused: list[tuple[float, int, int, str, sqlite3.Row, str]] = []
+        for concept_id in set(fts_ranks) | set(vector_ranks):
+            score = 0.0
+            fts_rank = fts_ranks.get(concept_id)
+            vector_rank = vector_ranks.get(concept_id)
+            if fts_rank is not None:
+                score += 1.0 / (RRF_K + fts_rank)
+            if vector_rank is not None:
+                score += 1.0 / (RRF_K + vector_rank)
 
-        results = []
-        for row in cursor.fetchall():
-            results.append({
-                "concept_id": row["concept_id"],
-                "type": row["type"],
-                "title": row["title"],
-                "description": row["description"],
-                "status": row["status"],
-                "trust_level": row["trust_level"],
-                "stale": bool(row["stale"]),
-                "stale_days": row["stale_days"],
-                "tags": row["tags"].split(",") if row["tags"] else [],
-            })
+            best_row = next(
+                (row for row in fts_ranked if row["concept_id"] == concept_id),
+                None,
+            ) or next(row for row in vector_ranked if row["concept_id"] == concept_id)
+            kind = str(best_row["kind"])
+            fused.append(
+                (
+                    score,
+                    fts_rank if fts_rank is not None else CANDIDATE_POOL + 1,
+                    vector_rank if vector_rank is not None else CANDIDATE_POOL + 1,
+                    concept_id,
+                    best_row,
+                    kind,
+                )
+            )
 
-        return results
+        # Highest fused score first. Ties prefer the keyword match, then the
+        # semantic match, then the concept ID so ordering is deterministic.
+        fused.sort(key=lambda item: (-item[0], item[1], item[2], item[3]))
+
+        hits: list[SearchHit] = []
+        for score, _, _, concept_id, row, kind in fused[:top_k]:
+            body_row = body_rows.get(concept_id, row)
+            hits.append(
+                SearchHit(
+                    concept_id=concept_id,
+                    chunk_index=int(row["chunk_index"]),
+                    kind=kind,
+                    heading=row["heading"] or None,
+                    text=str(row["text"]),
+                    excerpt_text=str(body_row["text"]),
+                    anchor=(str(body_row["heading"]) if str(body_row["kind"]) == "body" else None),
+                    score=score,
+                    fts_rank=fts_ranks.get(concept_id),
+                    vector_rank=vector_ranks.get(concept_id),
+                )
+            )
+
+        return SearchResponse(
+            hits=tuple(hits),
+            fts_available=bool(fts_rows) or _fts_query(query) is None,
+            vector_available=bool(vector_rows),
+            candidate_count=len(set(fts_ranks) | set(vector_ranks)),
+        )
+
+    @staticmethod
+    def _best_per_concept(rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
+        """Keep only the best-ranked chunk for each concept, preserving order."""
+        seen: set[str] = set()
+        best: list[sqlite3.Row] = []
+        for row in rows:
+            concept_id = str(row["concept_id"])
+            if concept_id in seen:
+                continue
+            seen.add(concept_id)
+            best.append(row)
+        return best
+
+    @staticmethod
+    def _best_body_per_concept(rows: list[sqlite3.Row]) -> dict[str, sqlite3.Row]:
+        """Pick the best body chunk per concept, falling back to any chunk."""
+        best: dict[str, sqlite3.Row] = {}
+        for row in rows:
+            concept_id = str(row["concept_id"])
+            existing = best.get(concept_id)
+            if existing is None:
+                best[concept_id] = row
+            elif str(existing["kind"]) != "body" and str(row["kind"]) == "body":
+                best[concept_id] = row
+        return best
+
+    # -- lifecycle --------------------------------------------------------
+
+    def fingerprint(self) -> str | None:
+        """Return the fingerprint recorded when the index was last built."""
+        conn = self._connect()
+        self.initialize()
+        row = conn.execute(
+            f"SELECT value FROM {self.meta_table} WHERE key = 'fingerprint'"
+        ).fetchone()
+        return str(row["value"]) if row else None
+
+    def vectors_available(self) -> bool:
+        """Return whether the index contains embedding vectors."""
+        conn = self._connect()
+        self.initialize()
+        row = conn.execute(
+            f"SELECT value FROM {self.meta_table} WHERE key = 'vectors_available'"
+        ).fetchone()
+        return bool(row and row["value"] == "1")
+
+    def is_current(self, bundle: Bundle) -> bool:
+        """Return whether the index matches the current bundle contents.
+
+        The index is stale when the documents changed *or* when the embedding
+        configuration changed, so turning embeddings on takes effect without
+        having to delete the index by hand.
+        """
+        return self.fingerprint() == self._index_fingerprint(bundle)
+
+    def _index_fingerprint(self, bundle: Bundle) -> str:
+        """Fingerprint of the documents plus the embedding configuration."""
+        return f"{bundle_fingerprint(bundle)}|{self.embedding_signature}"
 
     def close(self) -> None:
         """Close the database connection."""
@@ -519,13 +581,29 @@ class KnowledgeIndex:
             self._conn.close()
             self._conn = None
 
-    def __enter__(self):
-        self._ensure_conn()
+    def __enter__(self) -> Self:
+        """Enter the context manager."""
+        self.initialize()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, *_exc: object) -> None:
+        """Leave the context manager."""
         self.close()
 
 
-# Import re for the table name sanitization
-import re
+def default_index_path(bundle_name: str) -> Path:
+    """Return the default on-disk location of a bundle's index.
+
+    The index lives outside the wiki repository so it never shows up in a
+    reviewable diff. ``MARKRAG_INDEX_DIR`` overrides the location, which keeps
+    test runs isolated from the user's home directory.
+
+    Args:
+        bundle_name: Name of the bundle.
+
+    Returns:
+        Path to the SQLite file.
+    """
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", bundle_name)
+    base = os.path.expanduser(os.getenv("MARKRAG_INDEX_DIR", "~/.markrag"))
+    return Path(base).expanduser() / f"{safe}.db"
